@@ -6,26 +6,26 @@ $error = '';
 $success = '';
 
 // Handle transaction actions
-if ($_POST) {
-    if (!verifyCSRFToken($_POST['csrf_token'] ?? '')) {
+if ($_POST && isset($_POST['csrf_token'])) {
+    if (!verifyCSRFToken($_POST['csrf_token'])) {
         $error = 'Invalid request. Please try again.';
     } else {
         $action = $_POST['action'] ?? '';
-        $transaction_id = (int)($_POST['transaction_id'] ?? 0);
+        $transaction_id = intval($_POST['transaction_id'] ?? 0);
         
         switch ($action) {
             case 'approve_withdrawal':
-                $stmt = $db->prepare("
-                    SELECT t.*, u.full_name, u.email 
-                    FROM transactions t 
-                    JOIN users u ON t.user_id = u.id 
-                    WHERE t.id = ? AND t.type = 'withdrawal' AND t.status = 'pending'
-                ");
-                $stmt->execute([$transaction_id]);
-                $transaction = $stmt->fetch();
-                
-                if ($transaction) {
-                    try {
+                try {
+                    $stmt = $db->prepare("
+                        SELECT t.*, u.full_name, u.email 
+                        FROM transactions t 
+                        JOIN users u ON t.user_id = u.id 
+                        WHERE t.id = ? AND t.type = 'withdrawal' AND t.status = 'pending'
+                    ");
+                    $stmt->execute([$transaction_id]);
+                    $transaction = $stmt->fetch(PDO::FETCH_ASSOC);
+                    
+                    if ($transaction) {
                         $db->beginTransaction();
                         
                         // Update transaction status
@@ -47,31 +47,40 @@ if ($_POST) {
                         
                         $db->commit();
                         $success = 'Withdrawal approved successfully.';
-                    } catch (Exception $e) {
-                        $db->rollBack();
-                        $error = 'Failed to approve withdrawal.';
+                    } else {
+                        $error = 'Transaction not found or already processed.';
                     }
+                } catch (Exception $e) {
+                    if ($db->inTransaction()) {
+                        $db->rollBack();
+                    }
+                    $error = 'Failed to approve withdrawal: ' . $e->getMessage();
                 }
                 break;
                 
             case 'reject_withdrawal':
-                $reason = sanitize($_POST['rejection_reason'] ?? '');
+                $reason = trim($_POST['rejection_reason'] ?? '');
                 
-                $stmt = $db->prepare("
-                    SELECT t.*, u.full_name, u.email 
-                    FROM transactions t 
-                    JOIN users u ON t.user_id = u.id 
-                    WHERE t.id = ? AND t.type = 'withdrawal' AND t.status = 'pending'
-                ");
-                $stmt->execute([$transaction_id]);
-                $transaction = $stmt->fetch();
+                if (empty($reason)) {
+                    $error = 'Please provide a rejection reason.';
+                    break;
+                }
                 
-                if ($transaction) {
-                    try {
+                try {
+                    $stmt = $db->prepare("
+                        SELECT t.*, u.full_name, u.email 
+                        FROM transactions t 
+                        JOIN users u ON t.user_id = u.id 
+                        WHERE t.id = ? AND t.type = 'withdrawal' AND t.status = 'pending'
+                    ");
+                    $stmt->execute([$transaction_id]);
+                    $transaction = $stmt->fetch(PDO::FETCH_ASSOC);
+                    
+                    if ($transaction) {
                         $db->beginTransaction();
                         
                         // Return funds to user wallet
-                        $stmt = $db->prepare("UPDATE users SET wallet_balance = wallet_balance + ? WHERE id = ?");
+                        $stmt = $db->prepare("UPDATE users SET wallet_balance = wallet_balance + ?, updated_at = NOW() WHERE id = ?");
                         $stmt->execute([$transaction['amount'], $transaction['user_id']]);
                         
                         // Update transaction status
@@ -93,29 +102,33 @@ if ($_POST) {
                         
                         $db->commit();
                         $success = 'Withdrawal rejected and funds returned to user.';
-                    } catch (Exception $e) {
-                        $db->rollBack();
-                        $error = 'Failed to reject withdrawal.';
+                    } else {
+                        $error = 'Transaction not found or already processed.';
                     }
+                } catch (Exception $e) {
+                    if ($db->inTransaction()) {
+                        $db->rollBack();
+                    }
+                    $error = 'Failed to reject withdrawal: ' . $e->getMessage();
                 }
                 break;
                 
             case 'approve_deposit':
-                $stmt = $db->prepare("
-                    SELECT t.*, u.full_name, u.email 
-                    FROM transactions t 
-                    JOIN users u ON t.user_id = u.id 
-                    WHERE t.id = ? AND t.type = 'deposit' AND t.status = 'pending'
-                ");
-                $stmt->execute([$transaction_id]);
-                $transaction = $stmt->fetch();
-                
-                if ($transaction) {
-                    try {
+                try {
+                    $stmt = $db->prepare("
+                        SELECT t.*, u.full_name, u.email 
+                        FROM transactions t 
+                        JOIN users u ON t.user_id = u.id 
+                        WHERE t.id = ? AND t.type = 'deposit' AND t.status = 'pending'
+                    ");
+                    $stmt->execute([$transaction_id]);
+                    $transaction = $stmt->fetch(PDO::FETCH_ASSOC);
+                    
+                    if ($transaction) {
                         $db->beginTransaction();
                         
                         // Credit user wallet
-                        $stmt = $db->prepare("UPDATE users SET wallet_balance = wallet_balance + ?, total_deposited = total_deposited + ? WHERE id = ?");
+                        $stmt = $db->prepare("UPDATE users SET wallet_balance = wallet_balance + ?, total_deposited = total_deposited + ?, updated_at = NOW() WHERE id = ?");
                         $stmt->execute([$transaction['amount'], $transaction['amount'], $transaction['user_id']]);
                         
                         // Update transaction status
@@ -137,10 +150,41 @@ if ($_POST) {
                         
                         $db->commit();
                         $success = 'Deposit approved successfully.';
-                    } catch (Exception $e) {
-                        $db->rollBack();
-                        $error = 'Failed to approve deposit.';
+                    } else {
+                        $error = 'Transaction not found or already processed.';
                     }
+                } catch (Exception $e) {
+                    if ($db->inTransaction()) {
+                        $db->rollBack();
+                    }
+                    $error = 'Failed to approve deposit: ' . $e->getMessage();
+                }
+                break;
+                
+            case 'update_transaction_status':
+                $new_status = $_POST['new_status'] ?? '';
+                $admin_notes = trim($_POST['admin_notes'] ?? '');
+                
+                if (!in_array($new_status, ['pending', 'completed', 'failed', 'cancelled'])) {
+                    $error = 'Invalid status selected.';
+                    break;
+                }
+                
+                try {
+                    $stmt = $db->prepare("
+                        UPDATE transactions 
+                        SET status = ?, processed_by = ?, admin_notes = ?, updated_at = NOW() 
+                        WHERE id = ?
+                    ");
+                    $notes = $admin_notes ?: "Status updated by " . $_SESSION['full_name'] . " on " . date('Y-m-d H:i:s');
+                    
+                    if ($stmt->execute([$new_status, $_SESSION['user_id'], $notes, $transaction_id])) {
+                        $success = 'Transaction status updated successfully.';
+                    } else {
+                        $error = 'Failed to update transaction status.';
+                    }
+                } catch (Exception $e) {
+                    $error = 'Database error: ' . $e->getMessage();
                 }
                 break;
         }
@@ -150,8 +194,8 @@ if ($_POST) {
 // Get filter parameters
 $type_filter = $_GET['type'] ?? 'all';
 $status_filter = $_GET['status'] ?? 'all';
-$search = sanitize($_GET['search'] ?? '');
-$page = max(1, (int)($_GET['page'] ?? 1));
+$search = trim($_GET['search'] ?? '');
+$page = max(1, intval($_GET['page'] ?? 1));
 $limit = 25;
 $offset = ($page - 1) * $limit;
 
@@ -180,47 +224,82 @@ if ($search) {
 
 $where_clause = implode(' AND ', $where_conditions);
 
-// Get total count
-$count_sql = "
-    SELECT COUNT(*) as total 
-    FROM transactions t 
-    JOIN users u ON t.user_id = u.id 
-    WHERE $where_clause
-";
-$stmt = $db->prepare($count_sql);
-$stmt->execute($params);
-$total_records = $stmt->fetch()['total'];
-$total_pages = ceil($total_records / $limit);
-
 // Get transactions
-$sql = "
-    SELECT t.*, u.full_name, u.email, u.phone,
-           admin.full_name as processed_by_name
-    FROM transactions t
-    JOIN users u ON t.user_id = u.id
-    LEFT JOIN users admin ON t.processed_by = admin.id
-    WHERE $where_clause
-    ORDER BY t.created_at DESC
-    LIMIT $limit OFFSET $offset
-";
+$transactions = [];
+$total_records = 0;
+$total_pages = 1;
 
-$stmt = $db->prepare($sql);
-$stmt->execute($params);
-$transactions = $stmt->fetchAll();
+try {
+    // Get total count
+    $count_sql = "
+        SELECT COUNT(*) as total 
+        FROM transactions t 
+        JOIN users u ON t.user_id = u.id 
+        WHERE $where_clause
+    ";
+    $stmt = $db->prepare($count_sql);
+    $stmt->execute($params);
+    $result = $stmt->fetch();
+    $total_records = $result ? $result['total'] : 0;
+    $total_pages = ceil($total_records / $limit);
+
+    // Get transactions
+    $sql = "
+        SELECT t.id, t.user_id, t.type, t.amount, t.status, t.mpesa_receipt, t.mpesa_request_id, 
+               t.phone_number, t.description, t.admin_notes, t.created_at, t.updated_at,
+               u.full_name, u.email, u.phone,
+               admin.full_name as processed_by_name
+        FROM transactions t
+        JOIN users u ON t.user_id = u.id
+        LEFT JOIN users admin ON t.processed_by = admin.id
+        WHERE $where_clause
+        ORDER BY t.created_at DESC
+        LIMIT $limit OFFSET $offset
+    ";
+
+    $stmt = $db->prepare($sql);
+    $stmt->execute($params);
+    $transactions = $stmt->fetchAll(PDO::FETCH_ASSOC);
+} catch (Exception $e) {
+    $error = 'Failed to load transactions: ' . $e->getMessage();
+}
 
 // Get summary statistics
-$stats_sql = "
-    SELECT 
-        COUNT(*) as total_transactions,
-        COUNT(CASE WHEN status = 'pending' THEN 1 END) as pending_transactions,
-        COUNT(CASE WHEN type = 'deposit' AND status = 'pending' THEN 1 END) as pending_deposits,
-        COUNT(CASE WHEN type = 'withdrawal' AND status = 'pending' THEN 1 END) as pending_withdrawals,
-        COALESCE(SUM(CASE WHEN type = 'deposit' AND status = 'completed' AND DATE(created_at) = CURDATE() THEN amount ELSE 0 END), 0) as today_deposits,
-        COALESCE(SUM(CASE WHEN type = 'withdrawal' AND status = 'completed' AND DATE(created_at) = CURDATE() THEN amount ELSE 0 END), 0) as today_withdrawals
-    FROM transactions
-";
-$stmt = $db->query($stats_sql);
-$stats = $stmt->fetch();
+$stats = [
+    'total_transactions' => 0,
+    'pending_transactions' => 0,
+    'pending_deposits' => 0,
+    'pending_withdrawals' => 0,
+    'today_deposits' => 0,
+    'today_withdrawals' => 0
+];
+
+try {
+    $stats_sql = "
+        SELECT 
+            COUNT(*) as total_transactions,
+            SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pending_transactions,
+            SUM(CASE WHEN type = 'deposit' AND status = 'pending' THEN 1 ELSE 0 END) as pending_deposits,
+            SUM(CASE WHEN type = 'withdrawal' AND status = 'pending' THEN 1 ELSE 0 END) as pending_withdrawals,
+            COALESCE(SUM(CASE WHEN type = 'deposit' AND status = 'completed' AND DATE(created_at) = CURDATE() THEN amount ELSE 0 END), 0) as today_deposits,
+            COALESCE(SUM(CASE WHEN type = 'withdrawal' AND status = 'completed' AND DATE(created_at) = CURDATE() THEN amount ELSE 0 END), 0) as today_withdrawals
+        FROM transactions
+    ";
+    $stmt = $db->query($stats_sql);
+    $result = $stmt->fetch(PDO::FETCH_ASSOC);
+    if ($result) {
+        $stats = $result;
+    }
+} catch (Exception $e) {
+    // Use default stats if query fails
+}
+
+// Helper function to format money
+if (!function_exists('formatMoney')) {
+    function formatMoney($amount) {
+        return 'KSh ' . number_format($amount, 2);
+    }
+}
 ?>
 
 <!DOCTYPE html>
@@ -243,11 +322,20 @@ $stats = $stmt->fetch();
         
         .modal {
             display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.5);
             backdrop-filter: blur(10px);
+            z-index: 1000;
         }
         
         .modal.show {
-            display: flex;
+            display: flex !important;
+            align-items: center;
+            justify-content: center;
         }
         
         .transaction-row:hover {
@@ -315,7 +403,7 @@ $stats = $stmt->fetch();
         <div class="mb-6 p-4 bg-red-500/20 border border-red-500/50 rounded-lg">
             <div class="flex items-center">
                 <i class="fas fa-exclamation-circle text-red-400 mr-2"></i>
-                <span class="text-red-300"><?php echo $error; ?></span>
+                <span class="text-red-300"><?php echo htmlspecialchars($error); ?></span>
             </div>
         </div>
         <?php endif; ?>
@@ -324,7 +412,7 @@ $stats = $stmt->fetch();
         <div class="mb-6 p-4 bg-emerald-500/20 border border-emerald-500/50 rounded-lg">
             <div class="flex items-center">
                 <i class="fas fa-check-circle text-emerald-400 mr-2"></i>
-                <span class="text-emerald-300"><?php echo $success; ?></span>
+                <span class="text-emerald-300"><?php echo htmlspecialchars($success); ?></span>
             </div>
         </div>
         <?php endif; ?>
@@ -420,13 +508,7 @@ $stats = $stmt->fetch();
 
         <!-- Transactions Table -->
         <section class="glass-card rounded-xl overflow-hidden">
-            <?php if (empty($transactions)): ?>
-                <div class="p-12 text-center">
-                    <i class="fas fa-receipt text-6xl text-gray-600 mb-4"></i>
-                    <h3 class="text-xl font-bold text-gray-400 mb-2">No transactions found</h3>
-                    <p class="text-gray-500">No transactions match your current filters</p>
-                </div>
-            <?php else: ?>
+            <?php if (!empty($transactions)): ?>
                 <div class="overflow-x-auto">
                     <table class="w-full">
                         <thead class="bg-gray-800/50">
@@ -443,6 +525,7 @@ $stats = $stmt->fetch();
                         <tbody>
                             <?php foreach ($transactions as $transaction): ?>
                             <tr class="transaction-row border-b border-gray-800">
+                                <!-- User Column -->
                                 <td class="p-4">
                                     <div class="flex items-center space-x-3">
                                         <div class="w-10 h-10 bg-gradient-to-r from-blue-500 to-purple-500 rounded-full flex items-center justify-center text-sm font-bold text-white">
@@ -452,11 +535,13 @@ $stats = $stmt->fetch();
                                             <p class="font-medium text-white"><?php echo htmlspecialchars($transaction['full_name']); ?></p>
                                             <p class="text-sm text-gray-400"><?php echo htmlspecialchars($transaction['email']); ?></p>
                                             <?php if ($transaction['phone']): ?>
-                                                <p class="text-xs text-blue-400"><?php echo $transaction['phone']; ?></p>
+                                                <p class="text-xs text-blue-400"><?php echo htmlspecialchars($transaction['phone']); ?></p>
                                             <?php endif; ?>
                                         </div>
                                     </div>
                                 </td>
+                                
+                                <!-- Type Column -->
                                 <td class="p-4 text-center">
                                     <span class="px-3 py-1 rounded-full text-xs font-medium
                                         <?php 
@@ -482,9 +567,13 @@ $stats = $stmt->fetch();
                                         <?php echo ucfirst(str_replace('_', ' ', $transaction['type'])); ?>
                                     </span>
                                 </td>
+                                
+                                <!-- Amount Column -->
                                 <td class="p-4 text-right">
                                     <p class="text-xl font-bold text-white"><?php echo formatMoney($transaction['amount']); ?></p>
                                 </td>
+                                
+                                <!-- Status Column -->
                                 <td class="p-4 text-center">
                                     <span class="px-3 py-1 rounded-full text-xs font-medium
                                         <?php 
@@ -499,39 +588,55 @@ $stats = $stmt->fetch();
                                         <?php echo ucfirst($transaction['status']); ?>
                                     </span>
                                 </td>
+                                
+                                <!-- Details Column -->
                                 <td class="p-4">
                                     <div class="max-w-xs">
                                         <p class="text-white text-sm"><?php echo htmlspecialchars(substr($transaction['description'] ?? 'N/A', 0, 50)); ?></p>
                                         <?php if ($transaction['mpesa_receipt']): ?>
-                                            <p class="text-green-400 text-xs mt-1">Receipt: <?php echo $transaction['mpesa_receipt']; ?></p>
+                                            <p class="text-green-400 text-xs mt-1">Receipt: <?php echo htmlspecialchars($transaction['mpesa_receipt']); ?></p>
                                         <?php endif; ?>
                                         <?php if ($transaction['processed_by_name']): ?>
-                                            <p class="text-blue-400 text-xs mt-1">By: <?php echo $transaction['processed_by_name']; ?></p>
+                                            <p class="text-blue-400 text-xs mt-1">By: <?php echo htmlspecialchars($transaction['processed_by_name']); ?></p>
                                         <?php endif; ?>
                                     </div>
                                 </td>
+                                
+                                <!-- Date Column -->
                                 <td class="p-4 text-center text-gray-300 text-sm">
                                     <p><?php echo date('M j, Y', strtotime($transaction['created_at'])); ?></p>
                                     <p class="text-xs text-gray-500"><?php echo date('g:i A', strtotime($transaction['created_at'])); ?></p>
                                 </td>
+                                
+                                <!-- Actions Column -->
                                 <td class="p-4 text-center">
                                     <?php if ($transaction['status'] === 'pending'): ?>
                                         <div class="flex items-center justify-center space-x-1">
                                             <?php if ($transaction['type'] === 'withdrawal'): ?>
-                                                <button onclick="approveWithdrawal(<?php echo $transaction['id']; ?>)" class="px-2 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded text-xs transition">
+                                                <button onclick="approveWithdrawal(<?php echo $transaction['id']; ?>)" 
+                                                        class="px-2 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded text-xs transition">
                                                     <i class="fas fa-check"></i>
                                                 </button>
-                                                <button onclick="rejectWithdrawal(<?php echo $transaction['id']; ?>)" class="px-2 py-1 bg-red-600 hover:bg-red-700 text-white rounded text-xs transition">
+                                                <button onclick="rejectWithdrawal(<?php echo $transaction['id']; ?>)" 
+                                                        class="px-2 py-1 bg-red-600 hover:bg-red-700 text-white rounded text-xs transition">
                                                     <i class="fas fa-times"></i>
                                                 </button>
                                             <?php elseif ($transaction['type'] === 'deposit'): ?>
-                                                <button onclick="approveDeposit(<?php echo $transaction['id']; ?>)" class="px-2 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded text-xs transition">
+                                                <button onclick="approveDeposit(<?php echo $transaction['id']; ?>)" 
+                                                        class="px-2 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded text-xs transition">
                                                     <i class="fas fa-check mr-1"></i>Approve
                                                 </button>
                                             <?php endif; ?>
+                                            <button onclick="openStatusModal(<?php echo $transaction['id']; ?>, '<?php echo $transaction['status']; ?>')" 
+                                                    class="px-2 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded text-xs transition">
+                                                <i class="fas fa-edit"></i>
+                                            </button>
                                         </div>
                                     <?php else: ?>
-                                        <span class="text-gray-500 text-xs">-</span>
+                                        <button onclick="openStatusModal(<?php echo $transaction['id']; ?>, '<?php echo $transaction['status']; ?>')" 
+                                                class="px-2 py-1 bg-gray-600 hover:bg-gray-700 text-white rounded text-xs transition">
+                                            <i class="fas fa-edit mr-1"></i>Edit
+                                        </button>
                                     <?php endif; ?>
                                 </td>
                             </tr>
@@ -549,7 +654,7 @@ $stats = $stmt->fetch();
                         </div>
                         <div class="flex items-center space-x-2">
                             <?php if ($page > 1): ?>
-                                <a href="?type=<?php echo $type_filter; ?>&status=<?php echo $status_filter; ?>&search=<?php echo urlencode($search); ?>&page=<?php echo $page-1; ?>" 
+                                <a href="?type=<?php echo htmlspecialchars($type_filter); ?>&status=<?php echo htmlspecialchars($status_filter); ?>&search=<?php echo urlencode($search); ?>&page=<?php echo $page-1; ?>" 
                                    class="px-3 py-2 bg-gray-800 text-gray-300 rounded hover:bg-gray-700 transition">
                                     <i class="fas fa-chevron-left"></i>
                                 </a>
@@ -561,14 +666,14 @@ $stats = $stmt->fetch();
                             
                             for ($i = $start; $i <= $end; $i++):
                             ?>
-                                <a href="?type=<?php echo $type_filter; ?>&status=<?php echo $status_filter; ?>&search=<?php echo urlencode($search); ?>&page=<?php echo $i; ?>" 
+                                <a href="?type=<?php echo htmlspecialchars($type_filter); ?>&status=<?php echo htmlspecialchars($status_filter); ?>&search=<?php echo urlencode($search); ?>&page=<?php echo $i; ?>" 
                                    class="px-3 py-2 rounded transition <?php echo $i === $page ? 'bg-emerald-600 text-white' : 'bg-gray-800 text-gray-300 hover:bg-gray-700'; ?>">
                                     <?php echo $i; ?>
                                 </a>
                             <?php endfor; ?>
                             
                             <?php if ($page < $total_pages): ?>
-                                <a href="?type=<?php echo $type_filter; ?>&status=<?php echo $status_filter; ?>&search=<?php echo urlencode($search); ?>&page=<?php echo $page+1; ?>" 
+                                <a href="?type=<?php echo htmlspecialchars($type_filter); ?>&status=<?php echo htmlspecialchars($status_filter); ?>&search=<?php echo urlencode($search); ?>&page=<?php echo $page+1; ?>" 
                                    class="px-3 py-2 bg-gray-800 text-gray-300 rounded hover:bg-gray-700 transition">
                                     <i class="fas fa-chevron-right"></i>
                                 </a>
@@ -577,21 +682,27 @@ $stats = $stmt->fetch();
                     </div>
                 </div>
                 <?php endif; ?>
+            <?php else: ?>
+                <div class="p-12 text-center">
+                    <i class="fas fa-receipt text-6xl text-gray-600 mb-4"></i>
+                    <h3 class="text-xl font-bold text-gray-400 mb-2">No transactions found</h3>
+                    <p class="text-gray-500">No transactions match your current filters</p>
+                </div>
             <?php endif; ?>
         </section>
     </main>
 
     <!-- Rejection Modal -->
-    <div id="rejectionModal" class="modal fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
-        <div class="glass-card rounded-xl p-6 max-w-md w-full">
+    <div id="rejectionModal" class="modal">
+        <div class="glass-card rounded-xl p-6 max-w-md w-full m-4">
             <div class="flex items-center justify-between mb-6">
                 <h3 class="text-xl font-bold text-white">Reject Withdrawal</h3>
-                <button onclick="closeRejectionModal()" class="text-gray-400 hover:text-white">
+                <button type="button" onclick="closeModal('rejectionModal')" class="text-gray-400 hover:text-white transition">
                     <i class="fas fa-times text-xl"></i>
                 </button>
             </div>
             
-            <form id="rejectionForm" method="POST">
+            <form method="POST">
                 <input type="hidden" name="csrf_token" value="<?php echo generateCSRFToken(); ?>">
                 <input type="hidden" name="action" value="reject_withdrawal">
                 <input type="hidden" name="transaction_id" id="rejectTransactionId">
@@ -611,7 +722,7 @@ $stats = $stmt->fetch();
                     <button type="submit" class="flex-1 px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg font-medium transition">
                         Reject & Return Funds
                     </button>
-                    <button type="button" onclick="closeRejectionModal()" class="px-4 py-2 bg-gray-600 hover:bg-gray-700 text-white rounded-lg font-medium transition">
+                    <button type="button" onclick="closeModal('rejectionModal')" class="px-4 py-2 bg-gray-600 hover:bg-gray-700 text-white rounded-lg font-medium transition">
                         Cancel
                     </button>
                 </div>
@@ -619,7 +730,56 @@ $stats = $stmt->fetch();
         </div>
     </div>
 
-    <!-- Hidden Forms -->
+    <!-- Status Update Modal -->
+    <div id="statusModal" class="modal">
+        <div class="glass-card rounded-xl p-6 max-w-md w-full m-4">
+            <div class="flex items-center justify-between mb-6">
+                <h3 class="text-xl font-bold text-white">Update Transaction Status</h3>
+                <button type="button" onclick="closeModal('statusModal')" class="text-gray-400 hover:text-white transition">
+                    <i class="fas fa-times text-xl"></i>
+                </button>
+            </div>
+            
+            <form method="POST">
+                <input type="hidden" name="csrf_token" value="<?php echo generateCSRFToken(); ?>">
+                <input type="hidden" name="action" value="update_transaction_status">
+                <input type="hidden" name="transaction_id" id="statusTransactionId">
+                
+                <div class="space-y-4">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-300 mb-2">Status *</label>
+                        <select name="new_status" id="statusSelect" class="w-full px-3 py-2 bg-gray-800 border border-gray-600 rounded text-white focus:border-emerald-500 focus:outline-none" required>
+                            <option value="pending">Pending</option>
+                            <option value="completed">Completed</option>
+                            <option value="failed">Failed</option>
+                            <option value="cancelled">Cancelled</option>
+                        </select>
+                    </div>
+                    
+                    <div>
+                        <label class="block text-sm font-medium text-gray-300 mb-2">Admin Notes</label>
+                        <textarea 
+                            name="admin_notes" 
+                            rows="3"
+                            class="w-full px-3 py-2 bg-gray-800 border border-gray-600 rounded text-white focus:border-emerald-500 focus:outline-none"
+                            placeholder="Optional notes about this status change..."
+                        ></textarea>
+                    </div>
+                </div>
+                
+                <div class="flex space-x-3 mt-6">
+                    <button type="submit" class="flex-1 px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-medium transition">
+                        Update Status
+                    </button>
+                    <button type="button" onclick="closeModal('statusModal')" class="px-4 py-2 bg-gray-600 hover:bg-gray-700 text-white rounded-lg font-medium transition">
+                        Cancel
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Hidden Forms for Quick Actions -->
     <form id="approveWithdrawalForm" method="POST" style="display: none;">
         <input type="hidden" name="csrf_token" value="<?php echo generateCSRFToken(); ?>">
         <input type="hidden" name="action" value="approve_withdrawal">
@@ -633,6 +793,10 @@ $stats = $stmt->fetch();
     </form>
 
     <script>
+        // Global variables
+        let currentModal = null;
+
+        // Quick action functions
         function approveWithdrawal(transactionId) {
             if (confirm('Are you sure you want to approve this withdrawal? This action cannot be undone.')) {
                 document.getElementById('approveWithdrawalId').value = transactionId;
@@ -643,6 +807,7 @@ $stats = $stmt->fetch();
         function rejectWithdrawal(transactionId) {
             document.getElementById('rejectTransactionId').value = transactionId;
             document.getElementById('rejectionModal').classList.add('show');
+            currentModal = 'rejectionModal';
         }
 
         function approveDeposit(transactionId) {
@@ -652,85 +817,145 @@ $stats = $stmt->fetch();
             }
         }
 
-        function closeRejectionModal() {
-            document.getElementById('rejectionModal').classList.remove('show');
+        function openStatusModal(transactionId, currentStatus) {
+            document.getElementById('statusTransactionId').value = transactionId;
+            document.getElementById('statusSelect').value = currentStatus;
+            document.getElementById('statusModal').classList.add('show');
+            currentModal = 'statusModal';
         }
 
-        // Close modal when clicking outside
-        document.getElementById('rejectionModal').addEventListener('click', function(e) {
-            if (e.target === this) {
-                closeRejectionModal();
+        // Modal functions
+        function closeModal(modalId = null) {
+            const modal = modalId || currentModal;
+            if (modal) {
+                document.getElementById(modal).classList.remove('show');
+                currentModal = null;
             }
+        }
+
+        // Event listeners
+        document.addEventListener('DOMContentLoaded', function() {
+            // Close modals when clicking outside
+            document.querySelectorAll('.modal').forEach(modal => {
+                modal.addEventListener('click', function(e) {
+                    if (e.target === this) {
+                        closeModal(this.id);
+                    }
+                });
+            });
+
+            // Form validation
+            document.querySelectorAll('form').forEach(form => {
+                form.addEventListener('submit', function(e) {
+                    const action = this.querySelector('input[name="action"]')?.value;
+                    
+                    if (action === 'reject_withdrawal') {
+                        const reason = this.querySelector('textarea[name="rejection_reason"]').value.trim();
+                        if (!reason) {
+                            e.preventDefault();
+                            alert('Please provide a rejection reason.');
+                            return false;
+                        }
+                    }
+                    
+                    if (action === 'update_transaction_status') {
+                        const status = this.querySelector('select[name="new_status"]').value;
+                        if (status === 'failed' || status === 'cancelled') {
+                            if (!confirm(`Are you sure you want to mark this transaction as ${status}?`)) {
+                                e.preventDefault();
+                                return false;
+                            }
+                        }
+                    }
+                });
+            });
+
+            // Keyboard shortcuts
+            document.addEventListener('keydown', function(e) {
+                if (e.key === 'Escape') {
+                    closeModal();
+                }
+            });
+
+            // Enhanced search with debounce
+            let searchTimeout;
+            const searchInput = document.querySelector('input[name="search"]');
+            if (searchInput) {
+                searchInput.addEventListener('input', function() {
+                    clearTimeout(searchTimeout);
+                    searchTimeout = setTimeout(() => {
+                        if (this.value.length >= 3 || this.value.length === 0) {
+                            this.form.submit();
+                        }
+                    }, 1000);
+                });
+            }
+
+            // Update transaction status colors
+            updateTransactionStatusColors();
         });
 
-        // Auto-refresh every 30 seconds for pending transactions
+        // Auto-refresh for pending transactions
         <?php if ($stats['pending_transactions'] > 0): ?>
         setInterval(function() {
-            location.reload();
-        }, 30000);
-        <?php endif; ?>
-
-        // Export functionality
-        function exportTransactions() {
-            const currentUrl = new URL(window.location.href);
-            currentUrl.searchParams.set('export', 'csv');
-            window.location.href = currentUrl.toString();
-        }
-
-        // Bulk actions (for future implementation)
-        function bulkApproveWithdrawals() {
-            if (confirm('Are you sure you want to approve all selected withdrawals?')) {
-                // Implementation for bulk approval
-            }
-        }
-
-        // Real-time updates using WebSocket (optional enhancement)
-        function initializeRealTimeUpdates() {
-            // WebSocket connection for real-time transaction updates
-            // This can be implemented for live updates without page refresh
-        }
-
-        // Keyboard shortcuts
-        document.addEventListener('keydown', function(e) {
-            if (e.ctrlKey && e.key === 'r') {
-                e.preventDefault();
+            if (!currentModal) {
                 location.reload();
             }
-        });
-
-        // Enhanced search with auto-complete
-        const searchInput = document.querySelector('input[name="search"]');
-        if (searchInput) {
-            let searchTimeout;
-            searchInput.addEventListener('input', function() {
-                clearTimeout(searchTimeout);
-                searchTimeout = setTimeout(() => {
-                    // Auto-submit search after 1 second of no typing
-                    if (this.value.length >= 3 || this.value.length === 0) {
-                        this.form.submit();
-                    }
-                }, 1000);
-            });
-        }
+        }, 30000); // Refresh every 30 seconds
+        <?php endif; ?>
 
         // Transaction status color coding
         function updateTransactionStatusColors() {
             document.querySelectorAll('.transaction-row').forEach(row => {
-                const status = row.querySelector('.status-badge')?.textContent?.toLowerCase();
-                if (status === 'pending') {
-                    row.style.borderLeft = '4px solid #f59e0b';
-                } else if (status === 'completed') {
-                    row.style.borderLeft = '4px solid #10b981';
-                } else if (status === 'failed') {
-                    row.style.borderLeft = '4px solid #ef4444';
+                const statusBadge = row.querySelector('[class*="status-"]');
+                if (statusBadge) {
+                    const status = statusBadge.textContent.toLowerCase().trim();
+                    switch(status) {
+                        case 'pending':
+                            row.style.borderLeft = '4px solid #f59e0b';
+                            break;
+                        case 'completed':
+                            row.style.borderLeft = '4px solid #10b981';
+                            break;
+                        case 'failed':
+                            row.style.borderLeft = '4px solid #ef4444';
+                            break;
+                        case 'cancelled':
+                            row.style.borderLeft = '4px solid #6b7280';
+                            break;
+                    }
                 }
             });
         }
 
-        // Initialize page
-        document.addEventListener('DOMContentLoaded', function() {
-            updateTransactionStatusColors();
-        });
+        // Format money display
+        function formatMoney(amount) {
+            return new Intl.NumberFormat('en-KE', {
+                style: 'currency',
+                currency: 'KES',
+                minimumFractionDigits: 0,
+                maximumFractionDigits: 2
+            }).format(amount);
+        }
+
+        // Copy transaction ID to clipboard
+        function copyTransactionId(transactionId) {
+            navigator.clipboard.writeText(transactionId).then(function() {
+                // Show temporary success message
+                const button = event.target;
+                const originalText = button.textContent;
+                button.textContent = 'Copied!';
+                setTimeout(() => {
+                    button.textContent = originalText;
+                }, 2000);
+            });
+        }
+
+        // Transaction details popup (for future implementation)
+        function showTransactionDetails(transactionId) {
+            // This could show a detailed modal with full transaction information
+            console.log('Show details for transaction:', transactionId);
+        }
     </script>
 </body>
 </html>
