@@ -110,6 +110,7 @@ logSystemHealth();
                         <a href="/admin/packages.php" class="text-gray-300 hover:text-emerald-400 transition">Packages</a>
                         <a href="/admin/transactions.php" class="text-gray-300 hover:text-emerald-400 transition">Transactions</a>
                         <a href="/admin/system-health.php" class="text-gray-300 hover:text-emerald-400 transition">System Health</a>
+                        <a href="/admin/tickets.php" class="text-gray-300 hover:text-emerald-400 transition">Tickets</a>
                         <a href="/admin/settings.php" class="text-gray-300 hover:text-emerald-400 transition">Settings</a>
                     </nav>
                 </div>
@@ -547,4 +548,5 @@ logSystemHealth();
         setInterval(updateClock, 1000);
     </script>
 </body>
+
 </html>
