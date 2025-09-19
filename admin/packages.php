@@ -6,96 +6,119 @@ $error = '';
 $success = '';
 
 // Handle package actions
-if ($_POST) {
-    if (!verifyCSRFToken($_POST['csrf_token'] ?? '')) {
+if ($_POST && isset($_POST['csrf_token'])) {
+    if (!verifyCSRFToken($_POST['csrf_token'])) {
         $error = 'Invalid request. Please try again.';
     } else {
         $action = $_POST['action'] ?? '';
         
         switch ($action) {
             case 'create_package':
-                $name = sanitize($_POST['name']);
-                $icon = sanitize($_POST['icon']);
-                $roi_percentage = (float)$_POST['roi_percentage'];
-                $duration_hours = (int)$_POST['duration_hours'];
-                $min_investment = (float)$_POST['min_investment'];
-                $max_investment = !empty($_POST['max_investment']) ? (float)$_POST['max_investment'] : null;
-                $description = sanitize($_POST['description']);
+                $name = trim($_POST['name'] ?? '');
+                $icon = trim($_POST['icon'] ?? '🌱');
+                $roi_percentage = floatval($_POST['roi_percentage'] ?? 0);
+                $duration_hours = intval($_POST['duration_hours'] ?? 24);
+                $min_investment = floatval($_POST['min_investment'] ?? 0);
+                $max_investment = !empty($_POST['max_investment']) ? floatval($_POST['max_investment']) : null;
+                $description = trim($_POST['description'] ?? '');
                 $status = $_POST['status'] ?? 'active';
                 
-                if ($name && $roi_percentage && $duration_hours && $min_investment) {
-                    $stmt = $db->prepare("
-                        INSERT INTO packages (name, icon, roi_percentage, duration_hours, min_investment, max_investment, description, status) 
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    ");
-                    if ($stmt->execute([$name, $icon, $roi_percentage, $duration_hours, $min_investment, $max_investment, $description, $status])) {
-                        $success = 'Package created successfully.';
-                    } else {
-                        $error = 'Failed to create package.';
+                if ($name && $roi_percentage > 0 && $duration_hours > 0 && $min_investment > 0) {
+                    try {
+                        $stmt = $db->prepare("
+                            INSERT INTO packages (name, icon, roi_percentage, duration_hours, min_investment, max_investment, description, status) 
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        ");
+                        if ($stmt->execute([$name, $icon, $roi_percentage, $duration_hours, $min_investment, $max_investment, $description, $status])) {
+                            $success = 'Package created successfully.';
+                        } else {
+                            $error = 'Failed to create package.';
+                        }
+                    } catch (Exception $e) {
+                        $error = 'Database error: ' . $e->getMessage();
                     }
                 } else {
-                    $error = 'Please fill in all required fields.';
+                    $error = 'Please fill in all required fields correctly.';
                 }
                 break;
                 
             case 'update_package':
-                $package_id = (int)$_POST['package_id'];
-                $name = sanitize($_POST['name']);
-                $icon = sanitize($_POST['icon']);
-                $roi_percentage = (float)$_POST['roi_percentage'];
-                $duration_hours = (int)$_POST['duration_hours'];
-                $min_investment = (float)$_POST['min_investment'];
-                $max_investment = !empty($_POST['max_investment']) ? (float)$_POST['max_investment'] : null;
-                $description = sanitize($_POST['description']);
+                $package_id = intval($_POST['package_id'] ?? 0);
+                $name = trim($_POST['name'] ?? '');
+                $icon = trim($_POST['icon'] ?? '🌱');
+                $roi_percentage = floatval($_POST['roi_percentage'] ?? 0);
+                $duration_hours = intval($_POST['duration_hours'] ?? 24);
+                $min_investment = floatval($_POST['min_investment'] ?? 0);
+                $max_investment = !empty($_POST['max_investment']) ? floatval($_POST['max_investment']) : null;
+                $description = trim($_POST['description'] ?? '');
                 $status = $_POST['status'] ?? 'active';
                 
-                if ($name && $roi_percentage && $duration_hours && $min_investment) {
-                    $stmt = $db->prepare("
-                        UPDATE packages 
-                        SET name=?, icon=?, roi_percentage=?, duration_hours=?, min_investment=?, max_investment=?, description=?, status=?, updated_at=NOW()
-                        WHERE id=?
-                    ");
-                    if ($stmt->execute([$name, $icon, $roi_percentage, $duration_hours, $min_investment, $max_investment, $description, $status, $package_id])) {
-                        $success = 'Package updated successfully.';
-                    } else {
-                        $error = 'Failed to update package.';
+                if ($package_id && $name && $roi_percentage > 0 && $duration_hours > 0 && $min_investment > 0) {
+                    try {
+                        $stmt = $db->prepare("
+                            UPDATE packages 
+                            SET name=?, icon=?, roi_percentage=?, duration_hours=?, min_investment=?, max_investment=?, description=?, status=?, updated_at=NOW()
+                            WHERE id=?
+                        ");
+                        if ($stmt->execute([$name, $icon, $roi_percentage, $duration_hours, $min_investment, $max_investment, $description, $status, $package_id])) {
+                            $success = 'Package updated successfully.';
+                        } else {
+                            $error = 'Failed to update package.';
+                        }
+                    } catch (Exception $e) {
+                        $error = 'Database error: ' . $e->getMessage();
                     }
                 } else {
-                    $error = 'Please fill in all required fields.';
+                    $error = 'Invalid package data provided.';
                 }
                 break;
                 
             case 'toggle_status':
-                $package_id = (int)$_POST['package_id'];
-                $new_status = $_POST['new_status'];
+                $package_id = intval($_POST['package_id'] ?? 0);
+                $new_status = $_POST['new_status'] ?? '';
                 
-                if (in_array($new_status, ['active', 'inactive'])) {
-                    $stmt = $db->prepare("UPDATE packages SET status=?, updated_at=NOW() WHERE id=?");
-                    if ($stmt->execute([$new_status, $package_id])) {
-                        $success = 'Package status updated successfully.';
-                    } else {
-                        $error = 'Failed to update package status.';
+                if ($package_id && in_array($new_status, ['active', 'inactive'])) {
+                    try {
+                        $stmt = $db->prepare("UPDATE packages SET status=?, updated_at=NOW() WHERE id=?");
+                        if ($stmt->execute([$new_status, $package_id])) {
+                            $success = 'Package status updated successfully.';
+                        } else {
+                            $error = 'Failed to update package status.';
+                        }
+                    } catch (Exception $e) {
+                        $error = 'Database error: ' . $e->getMessage();
                     }
+                } else {
+                    $error = 'Invalid status update request.';
                 }
                 break;
                 
             case 'delete_package':
-                $package_id = (int)$_POST['package_id'];
+                $package_id = intval($_POST['package_id'] ?? 0);
                 
-                // Check if package has active investments
-                $stmt = $db->prepare("SELECT COUNT(*) as active_count FROM active_packages WHERE package_id = ? AND status = 'active'");
-                $stmt->execute([$package_id]);
-                $active_count = $stmt->fetch()['active_count'];
-                
-                if ($active_count > 0) {
-                    $error = 'Cannot delete package with active investments. Please wait for all investments to complete.';
-                } else {
-                    $stmt = $db->prepare("DELETE FROM packages WHERE id = ?");
-                    if ($stmt->execute([$package_id])) {
-                        $success = 'Package deleted successfully.';
-                    } else {
-                        $error = 'Failed to delete package.';
+                if ($package_id) {
+                    try {
+                        // Check if package has active investments
+                        $stmt = $db->prepare("SELECT COUNT(*) as active_count FROM active_packages WHERE package_id = ? AND status = 'active'");
+                        $stmt->execute([$package_id]);
+                        $result = $stmt->fetch();
+                        $active_count = $result ? $result['active_count'] : 0;
+                        
+                        if ($active_count > 0) {
+                            $error = 'Cannot delete package with active investments. Please wait for all investments to complete.';
+                        } else {
+                            $stmt = $db->prepare("DELETE FROM packages WHERE id = ?");
+                            if ($stmt->execute([$package_id])) {
+                                $success = 'Package deleted successfully.';
+                            } else {
+                                $error = 'Failed to delete package.';
+                            }
+                        }
+                    } catch (Exception $e) {
+                        $error = 'Database error: ' . $e->getMessage();
                     }
+                } else {
+                    $error = 'Invalid package ID.';
                 }
                 break;
         }
@@ -103,31 +126,51 @@ if ($_POST) {
 }
 
 // Get packages with statistics
-$stmt = $db->query("
-    SELECT p.*,
-           COUNT(ap.id) as total_investments,
-           COUNT(CASE WHEN ap.status = 'active' THEN 1 END) as active_investments,
-           COALESCE(SUM(CASE WHEN ap.status = 'active' THEN ap.investment_amount ELSE 0 END), 0) as active_amount,
-           COALESCE(SUM(ap.investment_amount), 0) as total_invested
-    FROM packages p
-    LEFT JOIN active_packages ap ON p.id = ap.package_id
-    GROUP BY p.id
-    ORDER BY p.created_at DESC
-");
-$packages = $stmt->fetchAll();
+$packages = [];
+try {
+    $stmt = $db->query("
+        SELECT p.*,
+               COALESCE(COUNT(ap.id), 0) as total_investments,
+               COALESCE(COUNT(CASE WHEN ap.status = 'active' THEN 1 END), 0) as active_investments,
+               COALESCE(SUM(CASE WHEN ap.status = 'active' THEN ap.investment_amount ELSE 0 END), 0) as active_amount,
+               COALESCE(SUM(ap.investment_amount), 0) as total_invested
+        FROM packages p
+        LEFT JOIN active_packages ap ON p.id = ap.package_id
+        GROUP BY p.id, p.name, p.icon, p.roi_percentage, p.duration_hours, p.min_investment, p.max_investment, p.status, p.description, p.created_at, p.updated_at
+        ORDER BY p.created_at DESC
+    ");
+    $packages = $stmt->fetchAll(PDO::FETCH_ASSOC);
+} catch (Exception $e) {
+    $error = 'Failed to load packages: ' . $e->getMessage();
+}
 
-// Get package performance statistics
-$stmt = $db->query("
-    SELECT 
-        COUNT(*) as total_packages,
-        COUNT(CASE WHEN status = 'active' THEN 1 END) as active_packages,
-        COUNT(CASE WHEN status = 'inactive' THEN 1 END) as inactive_packages
-    FROM packages
-");
-$stats = $stmt->fetch();
+// Get package statistics
+$stats = ['total_packages' => 0, 'active_packages' => 0, 'inactive_packages' => 0];
+try {
+    $stmt = $db->query("
+        SELECT 
+            COUNT(*) as total_packages,
+            SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) as active_packages,
+            SUM(CASE WHEN status = 'inactive' THEN 1 ELSE 0 END) as inactive_packages
+        FROM packages
+    ");
+    $result = $stmt->fetch(PDO::FETCH_ASSOC);
+    if ($result) {
+        $stats = $result;
+    }
+} catch (Exception $e) {
+    // Use default stats if query fails
+}
 
 // Common emojis for packages
 $emoji_options = ['🌱', '🌿', '🌳', '🌾', '🌟', '💎', '🚀', '💰', '📈', '⚡', '🔥', '💫', '🎯', '🏆', '👑'];
+
+// Helper function to format money
+if (!function_exists('formatMoney')) {
+    function formatMoney($amount) {
+        return 'KSh ' . number_format($amount, 2);
+    }
+}
 ?>
 
 <!DOCTYPE html>
@@ -159,11 +202,20 @@ $emoji_options = ['🌱', '🌿', '🌳', '🌾', '🌟', '💎', '🚀', '💰'
         
         .modal {
             display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.5);
             backdrop-filter: blur(10px);
+            z-index: 1000;
         }
         
         .modal.show {
-            display: flex;
+            display: flex !important;
+            align-items: center;
+            justify-content: center;
         }
         
         .emoji-picker {
@@ -171,7 +223,7 @@ $emoji_options = ['🌱', '🌿', '🌳', '🌾', '🌟', '💎', '🚀', '💰'
         }
         
         .emoji-picker.show {
-            display: grid;
+            display: grid !important;
         }
     </style>
 </head>
@@ -232,7 +284,7 @@ $emoji_options = ['🌱', '🌿', '🌳', '🌾', '🌟', '💎', '🚀', '💰'
         <div class="mb-6 p-4 bg-red-500/20 border border-red-500/50 rounded-lg">
             <div class="flex items-center">
                 <i class="fas fa-exclamation-circle text-red-400 mr-2"></i>
-                <span class="text-red-300"><?php echo $error; ?></span>
+                <span class="text-red-300"><?php echo htmlspecialchars($error); ?></span>
             </div>
         </div>
         <?php endif; ?>
@@ -241,7 +293,7 @@ $emoji_options = ['🌱', '🌿', '🌳', '🌾', '🌟', '💎', '🚀', '💰'
         <div class="mb-6 p-4 bg-emerald-500/20 border border-emerald-500/50 rounded-lg">
             <div class="flex items-center">
                 <i class="fas fa-check-circle text-emerald-400 mr-2"></i>
-                <span class="text-emerald-300"><?php echo $success; ?></span>
+                <span class="text-emerald-300"><?php echo htmlspecialchars($success); ?></span>
             </div>
         </div>
         <?php endif; ?>
@@ -285,118 +337,118 @@ $emoji_options = ['🌱', '🌿', '🌳', '🌾', '🌟', '💎', '🚀', '💰'
 
         <!-- Packages Grid -->
         <section class="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
-            <?php foreach ($packages as $package): ?>
-            <div class="package-card glass-card rounded-xl p-6">
-                <!-- Package Header -->
-                <div class="flex items-center justify-between mb-4">
-                    <div class="flex items-center space-x-3">
-                        <div class="text-4xl"><?php echo $package['icon']; ?></div>
-                        <div>
-                            <h3 class="text-xl font-bold text-white"><?php echo htmlspecialchars($package['name']); ?></h3>
-                            <span class="px-2 py-1 rounded text-xs font-medium
-                                <?php echo $package['status'] === 'active' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-gray-500/20 text-gray-400'; ?>">
-                                <?php echo ucfirst($package['status']); ?>
-                            </span>
+            <?php if (!empty($packages)): ?>
+                <?php foreach ($packages as $package): ?>
+                <div class="package-card glass-card rounded-xl p-6">
+                    <!-- Package Header -->
+                    <div class="flex items-center justify-between mb-4">
+                        <div class="flex items-center space-x-3">
+                            <div class="text-4xl"><?php echo htmlspecialchars($package['icon']); ?></div>
+                            <div>
+                                <h3 class="text-xl font-bold text-white"><?php echo htmlspecialchars($package['name']); ?></h3>
+                                <span class="px-2 py-1 rounded text-xs font-medium
+                                    <?php echo $package['status'] === 'active' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-gray-500/20 text-gray-400'; ?>">
+                                    <?php echo ucfirst($package['status']); ?>
+                                </span>
+                            </div>
+                        </div>
+                        <div class="flex items-center space-x-2">
+                            <button onclick="editPackage(<?php echo htmlspecialchars(json_encode($package)); ?>)" class="p-2 bg-blue-600 hover:bg-blue-700 text-white rounded transition">
+                                <i class="fas fa-edit text-sm"></i>
+                            </button>
+                            <button onclick="togglePackageStatus(<?php echo $package['id']; ?>, '<?php echo $package['status'] === 'active' ? 'inactive' : 'active'; ?>')" 
+                                    class="p-2 <?php echo $package['status'] === 'active' ? 'bg-yellow-600 hover:bg-yellow-700' : 'bg-emerald-600 hover:bg-emerald-700'; ?> text-white rounded transition">
+                                <i class="fas <?php echo $package['status'] === 'active' ? 'fa-pause' : 'fa-play'; ?> text-sm"></i>
+                            </button>
+                            <button onclick="deletePackage(<?php echo $package['id']; ?>)" class="p-2 bg-red-600 hover:bg-red-700 text-white rounded transition">
+                                <i class="fas fa-trash text-sm"></i>
+                            </button>
                         </div>
                     </div>
-                    <div class="flex items-center space-x-2">
-                        <button onclick="editPackage(<?php echo htmlspecialchars(json_encode($package)); ?>)" class="p-2 bg-blue-600 hover:bg-blue-700 text-white rounded transition">
-                            <i class="fas fa-edit text-sm"></i>
-                        </button>
-                        <button onclick="togglePackageStatus(<?php echo $package['id']; ?>, '<?php echo $package['status'] === 'active' ? 'inactive' : 'active'; ?>')" 
-                                class="p-2 <?php echo $package['status'] === 'active' ? 'bg-yellow-600 hover:bg-yellow-700' : 'bg-emerald-600 hover:bg-emerald-700'; ?> text-white rounded transition">
-                            <i class="fas <?php echo $package['status'] === 'active' ? 'fa-pause' : 'fa-play'; ?> text-sm"></i>
-                        </button>
-                        <button onclick="deletePackage(<?php echo $package['id']; ?>)" class="p-2 bg-red-600 hover:bg-red-700 text-white rounded transition">
-                            <i class="fas fa-trash text-sm"></i>
-                        </button>
-                    </div>
-                </div>
 
-                <!-- Package Details -->
-                <div class="space-y-3 mb-6">
-                    <div class="flex justify-between">
-                        <span class="text-gray-400">ROI Percentage</span>
-                        <span class="text-emerald-400 font-bold"><?php echo $package['roi_percentage']; ?>%</span>
+                    <!-- Package Details -->
+                    <div class="space-y-3 mb-6">
+                        <div class="flex justify-between">
+                            <span class="text-gray-400">ROI Percentage</span>
+                            <span class="text-emerald-400 font-bold"><?php echo $package['roi_percentage']; ?>%</span>
+                        </div>
+                        <div class="flex justify-between">
+                            <span class="text-gray-400">Duration</span>
+                            <span class="text-white font-medium">
+                                <?php 
+                                if ($package['duration_hours'] < 24) {
+                                    echo $package['duration_hours'] . ' Hours';
+                                } else {
+                                    echo ($package['duration_hours'] / 24) . ' Days';
+                                }
+                                ?>
+                            </span>
+                        </div>
+                        <div class="flex justify-between">
+                            <span class="text-gray-400">Min Investment</span>
+                            <span class="text-white font-medium"><?php echo formatMoney($package['min_investment']); ?></span>
+                        </div>
+                        <?php if ($package['max_investment']): ?>
+                        <div class="flex justify-between">
+                            <span class="text-gray-400">Max Investment</span>
+                            <span class="text-white font-medium"><?php echo formatMoney($package['max_investment']); ?></span>
+                        </div>
+                        <?php endif; ?>
                     </div>
-                    <div class="flex justify-between">
-                        <span class="text-gray-400">Duration</span>
-                        <span class="text-white font-medium">
-                            <?php 
-                            if ($package['duration_hours'] < 24) {
-                                echo $package['duration_hours'] . ' Hours';
-                            } else {
-                                echo ($package['duration_hours'] / 24) . ' Days';
-                            }
-                            ?>
-                        </span>
+
+                    <!-- Package Statistics -->
+                    <div class="bg-gray-800/50 rounded-lg p-4 mb-4">
+                        <div class="grid grid-cols-2 gap-4 text-sm">
+                            <div>
+                                <p class="text-gray-400">Total Investments</p>
+                                <p class="text-white font-bold"><?php echo number_format($package['total_investments']); ?></p>
+                            </div>
+                            <div>
+                                <p class="text-gray-400">Active Now</p>
+                                <p class="text-emerald-400 font-bold"><?php echo number_format($package['active_investments']); ?></p>
+                            </div>
+                        </div>
+                        <div class="mt-3 pt-3 border-t border-gray-700">
+                            <div class="grid grid-cols-2 gap-4 text-sm">
+                                <div>
+                                    <p class="text-gray-400">Total Invested</p>
+                                    <p class="text-yellow-400 font-bold"><?php echo formatMoney($package['total_invested']); ?></p>
+                                </div>
+                                <div>
+                                    <p class="text-gray-400">Active Amount</p>
+                                    <p class="text-purple-400 font-bold"><?php echo formatMoney($package['active_amount']); ?></p>
+                                </div>
+                            </div>
+                        </div>
                     </div>
-                    <div class="flex justify-between">
-                        <span class="text-gray-400">Min Investment</span>
-                        <span class="text-white font-medium"><?php echo formatMoney($package['min_investment']); ?></span>
-                    </div>
-                    <?php if ($package['max_investment']): ?>
-                    <div class="flex justify-between">
-                        <span class="text-gray-400">Max Investment</span>
-                        <span class="text-white font-medium"><?php echo formatMoney($package['max_investment']); ?></span>
+
+                    <!-- Description -->
+                    <?php if ($package['description']): ?>
+                    <div class="text-gray-300 text-sm">
+                        <?php echo htmlspecialchars($package['description']); ?>
                     </div>
                     <?php endif; ?>
                 </div>
-
-                <!-- Package Statistics -->
-                <div class="bg-gray-800/50 rounded-lg p-4 mb-4">
-                    <div class="grid grid-cols-2 gap-4 text-sm">
-                        <div>
-                            <p class="text-gray-400">Total Investments</p>
-                            <p class="text-white font-bold"><?php echo number_format($package['total_investments']); ?></p>
-                        </div>
-                        <div>
-                            <p class="text-gray-400">Active Now</p>
-                            <p class="text-emerald-400 font-bold"><?php echo number_format($package['active_investments']); ?></p>
-                        </div>
-                    </div>
-                    <div class="mt-3 pt-3 border-t border-gray-700">
-                        <div class="grid grid-cols-2 gap-4 text-sm">
-                            <div>
-                                <p class="text-gray-400">Total Invested</p>
-                                <p class="text-yellow-400 font-bold"><?php echo formatMoney($package['total_invested']); ?></p>
-                            </div>
-                            <div>
-                                <p class="text-gray-400">Active Amount</p>
-                                <p class="text-purple-400 font-bold"><?php echo formatMoney($package['active_amount']); ?></p>
-                            </div>
-                        </div>
-                    </div>
+                <?php endforeach; ?>
+            <?php else: ?>
+                <div class="col-span-full text-center py-12">
+                    <i class="fas fa-box text-6xl text-gray-600 mb-4"></i>
+                    <h3 class="text-xl font-bold text-gray-400 mb-2">No packages created yet</h3>
+                    <p class="text-gray-500 mb-6">Create your first trading package to get started</p>
+                    <button onclick="openCreateModal()" class="px-6 py-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-medium transition">
+                        <i class="fas fa-plus mr-2"></i>Create First Package
+                    </button>
                 </div>
-
-                <!-- Description -->
-                <?php if ($package['description']): ?>
-                <div class="text-gray-300 text-sm">
-                    <?php echo htmlspecialchars($package['description']); ?>
-                </div>
-                <?php endif; ?>
-            </div>
-            <?php endforeach; ?>
+            <?php endif; ?>
         </section>
-
-        <?php if (empty($packages)): ?>
-        <div class="text-center py-12">
-            <i class="fas fa-box text-6xl text-gray-600 mb-4"></i>
-            <h3 class="text-xl font-bold text-gray-400 mb-2">No packages created yet</h3>
-            <p class="text-gray-500 mb-6">Create your first trading package to get started</p>
-            <button onclick="openCreateModal()" class="px-6 py-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-medium transition">
-                <i class="fas fa-plus mr-2"></i>Create First Package
-            </button>
-        </div>
-        <?php endif; ?>
     </main>
 
     <!-- Create/Edit Package Modal -->
-    <div id="packageModal" class="modal fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
-        <div class="glass-card rounded-xl p-6 max-w-md w-full max-h-[90vh] overflow-y-auto">
+    <div id="packageModal" class="modal">
+        <div class="glass-card rounded-xl p-6 max-w-md w-full max-h-[90vh] overflow-y-auto m-4">
             <div class="flex items-center justify-between mb-6">
                 <h3 class="text-xl font-bold text-white" id="modalTitle">Create New Package</h3>
-                <button onclick="closePackageModal()" class="text-gray-400 hover:text-white">
+                <button type="button" onclick="closeModal()" class="text-gray-400 hover:text-white transition">
                     <i class="fas fa-times text-xl"></i>
                 </button>
             </div>
@@ -547,7 +599,7 @@ $emoji_options = ['🌱', '🌿', '🌳', '🌾', '🌟', '💎', '🚀', '💰'
                     <button type="submit" class="flex-1 px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-medium transition">
                         <i class="fas fa-save mr-2"></i><span id="submitText">Create Package</span>
                     </button>
-                    <button type="button" onclick="closePackageModal()" class="px-4 py-2 bg-gray-600 hover:bg-gray-700 text-white rounded-lg font-medium transition">
+                    <button type="button" onclick="closeModal()" class="px-4 py-2 bg-gray-600 hover:bg-gray-700 text-white rounded-lg font-medium transition">
                         Cancel
                     </button>
                 </div>
@@ -555,7 +607,7 @@ $emoji_options = ['🌱', '🌿', '🌳', '🌾', '🌟', '💎', '🚀', '💰'
         </div>
     </div>
 
-    <!-- Status Toggle Form -->
+    <!-- Hidden Forms for Actions -->
     <form id="statusForm" method="POST" style="display: none;">
         <input type="hidden" name="csrf_token" value="<?php echo generateCSRFToken(); ?>">
         <input type="hidden" name="action" value="toggle_status">
@@ -563,7 +615,6 @@ $emoji_options = ['🌱', '🌿', '🌳', '🌾', '🌟', '💎', '🚀', '💰'
         <input type="hidden" name="new_status" id="newStatus">
     </form>
 
-    <!-- Delete Form -->
     <form id="deleteForm" method="POST" style="display: none;">
         <input type="hidden" name="csrf_token" value="<?php echo generateCSRFToken(); ?>">
         <input type="hidden" name="action" value="delete_package">
@@ -571,41 +622,69 @@ $emoji_options = ['🌱', '🌿', '🌳', '🌾', '🌟', '💎', '🚀', '💰'
     </form>
 
     <script>
+        // Global variables
+        let currentModal = null;
+        
+        // Modal functions
         function openCreateModal() {
             document.getElementById('modalTitle').textContent = 'Create New Package';
             document.getElementById('formAction').value = 'create_package';
             document.getElementById('submitText').textContent = 'Create Package';
-            document.getElementById('packageForm').reset();
             document.getElementById('packageId').value = '';
+            
+            // Reset form
+            document.getElementById('packageForm').reset();
+            document.getElementById('packageIcon').value = '🌱';
+            
+            // Hide emoji picker
+            document.getElementById('emojiPicker').classList.remove('show');
+            
+            // Show modal
             document.getElementById('packageModal').classList.add('show');
+            currentModal = 'packageModal';
+            
             updateROIPreview();
         }
 
         function editPackage(packageData) {
+            console.log('Editing package:', packageData);
+            
             document.getElementById('modalTitle').textContent = 'Edit Package';
             document.getElementById('formAction').value = 'update_package';
             document.getElementById('submitText').textContent = 'Update Package';
             document.getElementById('packageId').value = packageData.id;
             
             // Fill form with existing data
-            document.getElementById('packageName').value = packageData.name;
-            document.getElementById('packageIcon').value = packageData.icon;
-            document.getElementById('packageROI').value = packageData.roi_percentage;
-            document.getElementById('packageDuration').value = packageData.duration_hours;
-            document.getElementById('packageMinInvestment').value = packageData.min_investment;
+            document.getElementById('packageName').value = packageData.name || '';
+            document.getElementById('packageIcon').value = packageData.icon || '🌱';
+            document.getElementById('packageROI').value = packageData.roi_percentage || '';
+            document.getElementById('packageDuration').value = packageData.duration_hours || '';
+            document.getElementById('packageMinInvestment').value = packageData.min_investment || '';
             document.getElementById('packageMaxInvestment').value = packageData.max_investment || '';
             document.getElementById('packageDescription').value = packageData.description || '';
-            document.getElementById('packageStatus').value = packageData.status;
+            document.getElementById('packageStatus').value = packageData.status || 'active';
             
+            // Hide emoji picker
+            document.getElementById('emojiPicker').classList.remove('show');
+            
+            // Show modal
             document.getElementById('packageModal').classList.add('show');
+            currentModal = 'packageModal';
+            
             updateROIPreview();
         }
 
-        function closePackageModal() {
-            document.getElementById('packageModal').classList.remove('show');
+        function closeModal() {
+            if (currentModal) {
+                document.getElementById(currentModal).classList.remove('show');
+                currentModal = null;
+            }
+            
+            // Also hide emoji picker
             document.getElementById('emojiPicker').classList.remove('show');
         }
 
+        // Emoji picker functions
         function toggleEmojiPicker() {
             const picker = document.getElementById('emojiPicker');
             picker.classList.toggle('show');
@@ -616,6 +695,7 @@ $emoji_options = ['🌱', '🌿', '🌳', '🌾', '🌟', '💎', '🚀', '💰'
             document.getElementById('emojiPicker').classList.remove('show');
         }
 
+        // Package action functions
         function togglePackageStatus(packageId, newStatus) {
             const action = newStatus === 'active' ? 'activate' : 'deactivate';
             if (confirm(`Are you sure you want to ${action} this package?`)) {
@@ -632,6 +712,7 @@ $emoji_options = ['🌱', '🌿', '🌳', '🌾', '🌟', '💎', '🚀', '💰'
             }
         }
 
+        // ROI calculation preview
         function updateROIPreview() {
             const minInvestment = parseFloat(document.getElementById('packageMinInvestment').value) || 0;
             const roiPercentage = parseFloat(document.getElementById('packageROI').value) || 0;
@@ -666,73 +747,113 @@ $emoji_options = ['🌱', '🌿', '🌳', '🌾', '🌟', '💎', '🚀', '💰'
             }
         }
 
-        // Real-time ROI preview updates
-        document.getElementById('packageMinInvestment').addEventListener('input', updateROIPreview);
-        document.getElementById('packageROI').addEventListener('input', updateROIPreview);
-        document.getElementById('packageDuration').addEventListener('change', updateROIPreview);
-
-        // Close modal when clicking outside
-        document.getElementById('packageModal').addEventListener('click', function(e) {
-            if (e.target === this) {
-                closePackageModal();
-            }
-        });
-
-        // Form validation
-        document.getElementById('packageForm').addEventListener('submit', function(e) {
-            const minInvestment = parseFloat(document.getElementById('packageMinInvestment').value);
-            const maxInvestment = parseFloat(document.getElementById('packageMaxInvestment').value);
+        // Event listeners
+        document.addEventListener('DOMContentLoaded', function() {
+            // Real-time ROI preview updates
+            const minInvestmentInput = document.getElementById('packageMinInvestment');
+            const roiInput = document.getElementById('packageROI');
+            const durationSelect = document.getElementById('packageDuration');
             
-            if (maxInvestment && maxInvestment <= minInvestment) {
-                e.preventDefault();
-                alert('Maximum investment must be greater than minimum investment.');
-                return false;
-            }
-            
-            const roiPercentage = parseFloat(document.getElementById('packageROI').value);
-            if (roiPercentage > 50) {
-                if (!confirm('ROI percentage is very high (>50%). Are you sure this is correct?')) {
+            if (minInvestmentInput) minInvestmentInput.addEventListener('input', updateROIPreview);
+            if (roiInput) roiInput.addEventListener('input', updateROIPreview);
+            if (durationSelect) durationSelect.addEventListener('change', updateROIPreview);
+
+            // Close modal when clicking outside
+            document.getElementById('packageModal').addEventListener('click', function(e) {
+                if (e.target === this) {
+                    closeModal();
+                }
+            });
+
+            // Form validation
+            document.getElementById('packageForm').addEventListener('submit', function(e) {
+                const minInvestment = parseFloat(document.getElementById('packageMinInvestment').value);
+                const maxInvestment = parseFloat(document.getElementById('packageMaxInvestment').value);
+                
+                if (maxInvestment && maxInvestment <= minInvestment) {
                     e.preventDefault();
+                    alert('Maximum investment must be greater than minimum investment.');
                     return false;
                 }
-            }
-        });
+                
+                const roiPercentage = parseFloat(document.getElementById('packageROI').value);
+                if (roiPercentage > 50) {
+                    if (!confirm('ROI percentage is very high (>50%). Are you sure this is correct?')) {
+                        e.preventDefault();
+                        return false;
+                    }
+                }
 
-        // Auto-save form data to prevent loss
-        const formElements = ['packageName', 'packageIcon', 'packageROI', 'packageDuration', 'packageMinInvestment', 'packageMaxInvestment', 'packageDescription'];
-        formElements.forEach(elementId => {
-            const element = document.getElementById(elementId);
-            element.addEventListener('input', function() {
-                localStorage.setItem(`package_${elementId}`, this.value);
-            });
-        });
+                // Validate required fields
+                const name = document.getElementById('packageName').value.trim();
+                const icon = document.getElementById('packageIcon').value.trim();
+                const roi = document.getElementById('packageROI').value;
+                const duration = document.getElementById('packageDuration').value;
+                const minInv = document.getElementById('packageMinInvestment').value;
 
-        // Restore form data on page load
-        window.addEventListener('load', function() {
-            formElements.forEach(elementId => {
-                const savedValue = localStorage.getItem(`package_${elementId}`);
-                if (savedValue && document.getElementById(elementId).value === '') {
-                    document.getElementById(elementId).value = savedValue;
+                if (!name || !icon || !roi || !duration || !minInv) {
+                    e.preventDefault();
+                    alert('Please fill in all required fields.');
+                    return false;
                 }
             });
-        });
 
-        // Clear saved data when form is submitted successfully
-        document.getElementById('packageForm').addEventListener('submit', function() {
-            formElements.forEach(elementId => {
-                localStorage.removeItem(`package_${elementId}`);
+            // Keyboard shortcuts
+            document.addEventListener('keydown', function(e) {
+                if (e.key === 'Escape') {
+                    closeModal();
+                }
             });
+
+            // Initialize ROI preview
+            updateROIPreview();
         });
 
-        // Package profitability calculator
-        function calculatePackageProfitability() {
-            // This could be expanded to show expected platform profit/loss for each package
-            // based on historical data and current system health
+        // Auto-save functionality (optional)
+        function saveFormData() {
+            const formData = {
+                name: document.getElementById('packageName').value,
+                icon: document.getElementById('packageIcon').value,
+                roi: document.getElementById('packageROI').value,
+                duration: document.getElementById('packageDuration').value,
+                minInvestment: document.getElementById('packageMinInvestment').value,
+                maxInvestment: document.getElementById('packageMaxInvestment').value,
+                description: document.getElementById('packageDescription').value,
+                status: document.getElementById('packageStatus').value
+            };
+            localStorage.setItem('packageFormData', JSON.stringify(formData));
         }
 
-        // Initialize page
+        function loadFormData() {
+            const savedData = localStorage.getItem('packageFormData');
+            if (savedData) {
+                const formData = JSON.parse(savedData);
+                document.getElementById('packageName').value = formData.name || '';
+                document.getElementById('packageIcon').value = formData.icon || '🌱';
+                document.getElementById('packageROI').value = formData.roi || '';
+                document.getElementById('packageDuration').value = formData.duration || '24';
+                document.getElementById('packageMinInvestment').value = formData.minInvestment || '';
+                document.getElementById('packageMaxInvestment').value = formData.maxInvestment || '';
+                document.getElementById('packageDescription').value = formData.description || '';
+                document.getElementById('packageStatus').value = formData.status || 'active';
+            }
+        }
+
+        function clearFormData() {
+            localStorage.removeItem('packageFormData');
+        }
+
+        // Bind auto-save to form inputs
         document.addEventListener('DOMContentLoaded', function() {
-            // Any initialization code here
+            const formInputs = ['packageName', 'packageIcon', 'packageROI', 'packageDuration', 'packageMinInvestment', 'packageMaxInvestment', 'packageDescription', 'packageStatus'];
+            
+            formInputs.forEach(inputId => {
+                const element = document.getElementById(inputId);
+                if (element) {
+                    element.addEventListener('input', saveFormData);
+                    element.addEventListener('change', saveFormData);
+                }
+            });
         });
     </script>
 </body>
