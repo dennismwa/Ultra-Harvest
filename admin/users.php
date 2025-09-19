@@ -6,59 +6,70 @@ $error = '';
 $success = '';
 
 // Handle user actions
-if ($_POST) {
-    if (!verifyCSRFToken($_POST['csrf_token'] ?? '')) {
+if ($_POST && isset($_POST['csrf_token'])) {
+    if (!verifyCSRFToken($_POST['csrf_token'])) {
         $error = 'Invalid request. Please try again.';
     } else {
         $action = $_POST['action'] ?? '';
-        $user_id = (int)($_POST['user_id'] ?? 0);
+        $user_id = intval($_POST['user_id'] ?? 0);
         
         switch ($action) {
             case 'update_status':
-                $status = sanitize($_POST['status']);
-                if (in_array($status, ['active', 'suspended', 'banned'])) {
-                    $stmt = $db->prepare("UPDATE users SET status = ? WHERE id = ? AND is_admin = 0");
-                    if ($stmt->execute([$status, $user_id])) {
-                        $success = 'User status updated successfully.';
-                        
-                        // Send notification to user
-                        $message = match($status) {
-                            'suspended' => 'Your account has been suspended. Please contact support for assistance.',
-                            'banned' => 'Your account has been banned due to policy violations.',
-                            'active' => 'Your account has been reactivated. Welcome back!'
-                        };
-                        sendNotification($user_id, 'Account Status Update', $message, $status === 'active' ? 'success' : 'warning');
-                    } else {
-                        $error = 'Failed to update user status.';
+                $status = $_POST['status'] ?? '';
+                if (in_array($status, ['active', 'suspended', 'banned']) && $user_id) {
+                    try {
+                        $stmt = $db->prepare("UPDATE users SET status = ?, updated_at = NOW() WHERE id = ? AND is_admin = 0");
+                        if ($stmt->execute([$status, $user_id])) {
+                            $success = 'User status updated successfully.';
+                            
+                            // Send notification to user
+                            $message = match($status) {
+                                'suspended' => 'Your account has been suspended. Please contact support for assistance.',
+                                'banned' => 'Your account has been banned due to policy violations.',
+                                'active' => 'Your account has been reactivated. Welcome back!'
+                            };
+                            sendNotification($user_id, 'Account Status Update', $message, $status === 'active' ? 'success' : 'warning');
+                        } else {
+                            $error = 'Failed to update user status.';
+                        }
+                    } catch (Exception $e) {
+                        $error = 'Database error: ' . $e->getMessage();
                     }
+                } else {
+                    $error = 'Invalid status or user ID.';
                 }
                 break;
                 
             case 'adjust_balance':
-                $amount = (float)($_POST['amount'] ?? 0);
+                $amount = floatval($_POST['amount'] ?? 0);
                 $type = $_POST['balance_type'] ?? 'credit'; // credit or debit
-                $description = sanitize($_POST['description'] ?? '');
+                $description = trim($_POST['description'] ?? '');
                 
-                if ($amount > 0) {
+                if ($amount > 0 && $user_id && in_array($type, ['credit', 'debit'])) {
                     try {
                         $db->beginTransaction();
                         
                         if ($type === 'credit') {
-                            $stmt = $db->prepare("UPDATE users SET wallet_balance = wallet_balance + ? WHERE id = ?");
+                            $stmt = $db->prepare("UPDATE users SET wallet_balance = wallet_balance + ?, updated_at = NOW() WHERE id = ?");
                             $stmt->execute([$amount, $user_id]);
                             
                             // Create transaction record
-                            $stmt = $db->prepare("INSERT INTO transactions (user_id, type, amount, status, description, processed_by) VALUES (?, 'deposit', ?, 'completed', ?, ?)");
+                            $stmt = $db->prepare("INSERT INTO transactions (user_id, type, amount, status, description, processed_by, created_at) VALUES (?, 'deposit', ?, 'completed', ?, ?, NOW())");
                             $stmt->execute([$user_id, $amount, "Admin credit: " . $description, $_SESSION['user_id']]);
                             
                             sendNotification($user_id, 'Account Credited', formatMoney($amount) . " has been credited to your account. " . $description, 'success');
                         } else {
-                            $stmt = $db->prepare("UPDATE users SET wallet_balance = wallet_balance - ? WHERE id = ? AND wallet_balance >= ?");
-                            $affected = $stmt->execute([$amount, $user_id, $amount]);
+                            // Check if user has sufficient balance
+                            $stmt = $db->prepare("SELECT wallet_balance FROM users WHERE id = ?");
+                            $stmt->execute([$user_id]);
+                            $user = $stmt->fetch();
                             
-                            if ($stmt->rowCount() > 0) {
+                            if ($user && $user['wallet_balance'] >= $amount) {
+                                $stmt = $db->prepare("UPDATE users SET wallet_balance = wallet_balance - ?, updated_at = NOW() WHERE id = ?");
+                                $stmt->execute([$amount, $user_id]);
+                                
                                 // Create transaction record
-                                $stmt = $db->prepare("INSERT INTO transactions (user_id, type, amount, status, description, processed_by) VALUES (?, 'withdrawal', ?, 'completed', ?, ?)");
+                                $stmt = $db->prepare("INSERT INTO transactions (user_id, type, amount, status, description, processed_by, created_at) VALUES (?, 'withdrawal', ?, 'completed', ?, ?, NOW())");
                                 $stmt->execute([$user_id, $amount, "Admin debit: " . $description, $_SESSION['user_id']]);
                                 
                                 sendNotification($user_id, 'Account Debited', formatMoney($amount) . " has been debited from your account. " . $description, 'warning');
@@ -73,6 +84,25 @@ if ($_POST) {
                         $db->rollBack();
                         $error = 'Failed to adjust balance: ' . $e->getMessage();
                     }
+                } else {
+                    $error = 'Invalid amount or user data.';
+                }
+                break;
+                
+            case 'send_notification':
+                $title = trim($_POST['notification_title'] ?? '');
+                $message = trim($_POST['notification_message'] ?? '');
+                $type = $_POST['notification_type'] ?? 'info';
+                
+                if ($title && $message && $user_id) {
+                    try {
+                        sendNotification($user_id, $title, $message, $type);
+                        $success = 'Notification sent successfully.';
+                    } catch (Exception $e) {
+                        $error = 'Failed to send notification: ' . $e->getMessage();
+                    }
+                } else {
+                    $error = 'Please fill in all notification fields.';
                 }
                 break;
         }
@@ -81,22 +111,22 @@ if ($_POST) {
 
 // Get filter parameters
 $status_filter = $_GET['status'] ?? 'all';
-$search = sanitize($_GET['search'] ?? '');
-$page = max(1, (int)($_GET['page'] ?? 1));
+$search = trim($_GET['search'] ?? '');
+$page = max(1, intval($_GET['page'] ?? 1));
 $limit = 20;
 $offset = ($page - 1) * $limit;
 
-// Build query conditions
-$where_conditions = ["is_admin = 0"];
+// Build query conditions with proper table aliases
+$where_conditions = ["u.is_admin = 0"];
 $params = [];
 
 if ($status_filter !== 'all') {
-    $where_conditions[] = "status = ?";
+    $where_conditions[] = "u.status = ?";
     $params[] = $status_filter;
 }
 
 if ($search) {
-    $where_conditions[] = "(full_name LIKE ? OR email LIKE ? OR phone LIKE ?)";
+    $where_conditions[] = "(u.full_name LIKE ? OR u.email LIKE ? OR u.phone LIKE ?)";
     $search_param = "%$search%";
     $params[] = $search_param;
     $params[] = $search_param;
@@ -106,44 +136,70 @@ if ($search) {
 $where_clause = implode(' AND ', $where_conditions);
 
 // Get total count
-$count_sql = "SELECT COUNT(*) as total FROM users WHERE $where_clause";
-$stmt = $db->prepare($count_sql);
-$stmt->execute($params);
-$total_records = $stmt->fetch()['total'];
-$total_pages = ceil($total_records / $limit);
+$users = [];
+$total_records = 0;
+$total_pages = 1;
 
-// Get users
-$sql = "
-    SELECT u.*,
-           COALESCE(SUM(CASE WHEN t.type = 'deposit' AND t.status = 'completed' THEN t.amount ELSE 0 END), 0) as total_deposited,
-           COALESCE(SUM(CASE WHEN t.type = 'withdrawal' AND t.status = 'completed' THEN t.amount ELSE 0 END), 0) as total_withdrawn,
-           COUNT(CASE WHEN ref.id IS NOT NULL THEN 1 END) as total_referrals
-    FROM users u
-    LEFT JOIN transactions t ON u.id = t.user_id
-    LEFT JOIN users ref ON u.id = ref.referred_by
-    WHERE $where_clause
-    GROUP BY u.id
-    ORDER BY u.created_at DESC
-    LIMIT $limit OFFSET $offset
-";
+try {
+    $count_sql = "SELECT COUNT(*) as total FROM users u WHERE $where_clause";
+    $stmt = $db->prepare($count_sql);
+    $stmt->execute($params);
+    $result = $stmt->fetch();
+    $total_records = $result ? $result['total'] : 0;
+    $total_pages = ceil($total_records / $limit);
 
-$stmt = $db->prepare($sql);
-$stmt->execute($params);
-$users = $stmt->fetchAll();
+    // Get users with transaction statistics
+    $sql = "
+        SELECT u.id, u.email, u.full_name, u.phone, u.wallet_balance, u.referral_code, 
+               u.referred_by, u.referral_earnings, u.status, u.created_at, u.updated_at,
+               COALESCE(SUM(CASE WHEN t.type = 'deposit' AND t.status = 'completed' THEN t.amount ELSE 0 END), 0) as total_deposited,
+               COALESCE(SUM(CASE WHEN t.type = 'withdrawal' AND t.status = 'completed' THEN t.amount ELSE 0 END), 0) as total_withdrawn,
+               COUNT(DISTINCT ref.id) as total_referrals
+        FROM users u
+        LEFT JOIN transactions t ON u.id = t.user_id
+        LEFT JOIN users ref ON u.id = ref.referred_by
+        WHERE $where_clause
+        GROUP BY u.id, u.email, u.full_name, u.phone, u.wallet_balance, u.referral_code, 
+                 u.referred_by, u.referral_earnings, u.status, u.created_at, u.updated_at
+        ORDER BY u.created_at DESC
+        LIMIT $limit OFFSET $offset
+    ";
+
+    $stmt = $db->prepare($sql);
+    $stmt->execute($params);
+    $users = $stmt->fetchAll(PDO::FETCH_ASSOC);
+} catch (Exception $e) {
+    $error = 'Failed to load users: ' . $e->getMessage();
+}
 
 // Get summary statistics
-$stats_sql = "
-    SELECT 
-        COUNT(*) as total_users,
-        COUNT(CASE WHEN status = 'active' THEN 1 END) as active_users,
-        COUNT(CASE WHEN status = 'suspended' THEN 1 END) as suspended_users,
-        COUNT(CASE WHEN status = 'banned' THEN 1 END) as banned_users,
-        COUNT(CASE WHEN created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY) THEN 1 END) as new_users_30d
-    FROM users 
-    WHERE is_admin = 0
-";
-$stmt = $db->query($stats_sql);
-$stats = $stmt->fetch();
+$stats = ['total_users' => 0, 'active_users' => 0, 'suspended_users' => 0, 'banned_users' => 0, 'new_users_30d' => 0];
+try {
+    $stats_sql = "
+        SELECT 
+            COUNT(*) as total_users,
+            SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) as active_users,
+            SUM(CASE WHEN status = 'suspended' THEN 1 ELSE 0 END) as suspended_users,
+            SUM(CASE WHEN status = 'banned' THEN 1 ELSE 0 END) as banned_users,
+            SUM(CASE WHEN created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY) THEN 1 ELSE 0 END) as new_users_30d
+        FROM users 
+        WHERE is_admin = 0
+    ";
+    $stmt = $db->query($stats_sql);
+    $result = $stmt->fetch(PDO::FETCH_ASSOC);
+    if ($result) {
+        $stats = $result;
+    }
+} catch (Exception $e) {
+    // Use default stats if query fails
+}
+
+// Helper function to format money
+if (!function_exists('formatMoney')) {
+    function formatMoney($amount) {
+        return 'KSh ' . number_format($amount, 2);
+    }
+}
 ?>
 
 <!DOCTYPE html>
@@ -174,11 +230,20 @@ $stats = $stmt->fetch();
         
         .modal {
             display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.5);
             backdrop-filter: blur(10px);
+            z-index: 1000;
         }
         
         .modal.show {
-            display: flex;
+            display: flex !important;
+            align-items: center;
+            justify-content: center;
         }
     </style>
 </head>
@@ -239,7 +304,7 @@ $stats = $stmt->fetch();
         <div class="mb-6 p-4 bg-red-500/20 border border-red-500/50 rounded-lg">
             <div class="flex items-center">
                 <i class="fas fa-exclamation-circle text-red-400 mr-2"></i>
-                <span class="text-red-300"><?php echo $error; ?></span>
+                <span class="text-red-300"><?php echo htmlspecialchars($error); ?></span>
             </div>
         </div>
         <?php endif; ?>
@@ -248,7 +313,7 @@ $stats = $stmt->fetch();
         <div class="mb-6 p-4 bg-emerald-500/20 border border-emerald-500/50 rounded-lg">
             <div class="flex items-center">
                 <i class="fas fa-check-circle text-emerald-400 mr-2"></i>
-                <span class="text-emerald-300"><?php echo $success; ?></span>
+                <span class="text-emerald-300"><?php echo htmlspecialchars($success); ?></span>
             </div>
         </div>
         <?php endif; ?>
@@ -312,7 +377,7 @@ $stats = $stmt->fetch();
 
                 <!-- Search -->
                 <form method="GET" class="flex items-center space-x-3">
-                    <input type="hidden" name="status" value="<?php echo $status_filter; ?>">
+                    <input type="hidden" name="status" value="<?php echo htmlspecialchars($status_filter); ?>">
                     <div class="relative">
                         <i class="fas fa-search absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400"></i>
                         <input 
@@ -327,7 +392,7 @@ $stats = $stmt->fetch();
                         Search
                     </button>
                     <?php if ($search): ?>
-                    <a href="?status=<?php echo $status_filter; ?>" class="px-4 py-2 bg-gray-600 hover:bg-gray-700 text-white rounded-lg font-medium transition">
+                    <a href="?status=<?php echo htmlspecialchars($status_filter); ?>" class="px-4 py-2 bg-gray-600 hover:bg-gray-700 text-white rounded-lg font-medium transition">
                         Clear
                     </a>
                     <?php endif; ?>
@@ -337,13 +402,7 @@ $stats = $stmt->fetch();
 
         <!-- Users Table -->
         <section class="glass-card rounded-xl overflow-hidden">
-            <?php if (empty($users)): ?>
-                <div class="p-12 text-center">
-                    <i class="fas fa-users text-6xl text-gray-600 mb-4"></i>
-                    <h3 class="text-xl font-bold text-gray-400 mb-2">No users found</h3>
-                    <p class="text-gray-500">No users match your current filters</p>
-                </div>
-            <?php else: ?>
+            <?php if (!empty($users)): ?>
                 <!-- Desktop Table -->
                 <div class="hidden lg:block overflow-x-auto">
                     <table class="w-full">
@@ -402,11 +461,13 @@ $stats = $stmt->fetch();
                                 </td>
                                 <td class="p-4 text-center">
                                     <div class="flex items-center justify-center space-x-2">
-                                        <button onclick="openUserModal(<?php echo $user['id']; ?>)" class="px-3 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded text-xs transition">
-                                            <i class="fas fa-edit mr-1"></i>Edit
+                                        <button onclick="openUserModal(<?php echo $user['id']; ?>, '<?php echo htmlspecialchars($user['full_name']); ?>', '<?php echo $user['status']; ?>', <?php echo $user['wallet_balance']; ?>)" 
+                                                class="px-3 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded text-xs transition">
+                                            <i class="fas fa-edit mr-1"></i>Manage
                                         </button>
-                                        <button onclick="viewUserDetails(<?php echo $user['id']; ?>)" class="px-3 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded text-xs transition">
-                                            <i class="fas fa-eye mr-1"></i>View
+                                        <button onclick="openNotificationModal(<?php echo $user['id']; ?>, '<?php echo htmlspecialchars($user['full_name']); ?>')" 
+                                                class="px-3 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded text-xs transition">
+                                            <i class="fas fa-bell mr-1"></i>Notify
                                         </button>
                                     </div>
                                 </td>
@@ -458,11 +519,13 @@ $stats = $stmt->fetch();
                                 </div>
                             </div>
                             <div class="flex space-x-2">
-                                <button onclick="openUserModal(<?php echo $user['id']; ?>)" class="flex-1 px-3 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded text-sm transition">
-                                    <i class="fas fa-edit mr-1"></i>Edit
+                                <button onclick="openUserModal(<?php echo $user['id']; ?>, '<?php echo htmlspecialchars($user['full_name']); ?>', '<?php echo $user['status']; ?>', <?php echo $user['wallet_balance']; ?>)" 
+                                        class="flex-1 px-3 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded text-sm transition">
+                                    <i class="fas fa-edit mr-1"></i>Manage
                                 </button>
-                                <button onclick="viewUserDetails(<?php echo $user['id']; ?>)" class="flex-1 px-3 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded text-sm transition">
-                                    <i class="fas fa-eye mr-1"></i>View
+                                <button onclick="openNotificationModal(<?php echo $user['id']; ?>, '<?php echo htmlspecialchars($user['full_name']); ?>')" 
+                                        class="flex-1 px-3 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded text-sm transition">
+                                    <i class="fas fa-bell mr-1"></i>Notify
                                 </button>
                             </div>
                         </div>
@@ -479,7 +542,7 @@ $stats = $stmt->fetch();
                         </div>
                         <div class="flex items-center space-x-2">
                             <?php if ($page > 1): ?>
-                                <a href="?status=<?php echo $status_filter; ?>&search=<?php echo urlencode($search); ?>&page=<?php echo $page-1; ?>" 
+                                <a href="?status=<?php echo htmlspecialchars($status_filter); ?>&search=<?php echo urlencode($search); ?>&page=<?php echo $page-1; ?>" 
                                    class="px-3 py-2 bg-gray-800 text-gray-300 rounded hover:bg-gray-700 transition">
                                     <i class="fas fa-chevron-left"></i>
                                 </a>
@@ -491,14 +554,14 @@ $stats = $stmt->fetch();
                             
                             for ($i = $start; $i <= $end; $i++):
                             ?>
-                                <a href="?status=<?php echo $status_filter; ?>&search=<?php echo urlencode($search); ?>&page=<?php echo $i; ?>" 
+                                <a href="?status=<?php echo htmlspecialchars($status_filter); ?>&search=<?php echo urlencode($search); ?>&page=<?php echo $i; ?>" 
                                    class="px-3 py-2 rounded transition <?php echo $i === $page ? 'bg-emerald-600 text-white' : 'bg-gray-800 text-gray-300 hover:bg-gray-700'; ?>">
                                     <?php echo $i; ?>
                                 </a>
                             <?php endfor; ?>
                             
                             <?php if ($page < $total_pages): ?>
-                                <a href="?status=<?php echo $status_filter; ?>&search=<?php echo urlencode($search); ?>&page=<?php echo $page+1; ?>" 
+                                <a href="?status=<?php echo htmlspecialchars($status_filter); ?>&search=<?php echo urlencode($search); ?>&page=<?php echo $page+1; ?>" 
                                    class="px-3 py-2 bg-gray-800 text-gray-300 rounded hover:bg-gray-700 transition">
                                     <i class="fas fa-chevron-right"></i>
                                 </a>
@@ -507,46 +570,55 @@ $stats = $stmt->fetch();
                     </div>
                 </div>
                 <?php endif; ?>
+            <?php else: ?>
+                <div class="p-12 text-center">
+                    <i class="fas fa-users text-6xl text-gray-600 mb-4"></i>
+                    <h3 class="text-xl font-bold text-gray-400 mb-2">No users found</h3>
+                    <p class="text-gray-500">No users match your current filters</p>
+                </div>
             <?php endif; ?>
         </section>
     </main>
 
-    <!-- User Edit Modal -->
-    <div id="userModal" class="modal fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
-        <div class="glass-card rounded-xl p-6 max-w-md w-full">
+    <!-- User Management Modal -->
+    <div id="userModal" class="modal">
+        <div class="glass-card rounded-xl p-6 max-w-md w-full m-4">
             <div class="flex items-center justify-between mb-6">
-                <h3 class="text-xl font-bold text-white">Edit User</h3>
-                <button onclick="closeUserModal()" class="text-gray-400 hover:text-white">
+                <h3 class="text-xl font-bold text-white">Manage User</h3>
+                <button type="button" onclick="closeModal('userModal')" class="text-gray-400 hover:text-white transition">
                     <i class="fas fa-times text-xl"></i>
                 </button>
             </div>
             
-            <form id="editUserForm" method="POST">
+            <div class="mb-4">
+                <h4 class="font-medium text-white" id="modalUserName">User Name</h4>
+                <p class="text-sm text-gray-400">Current Balance: <span id="modalUserBalance">KSh 0.00</span></p>
+            </div>
+
+            <!-- Status Update -->
+            <form method="POST" class="mb-6">
                 <input type="hidden" name="csrf_token" value="<?php echo generateCSRFToken(); ?>">
+                <input type="hidden" name="action" value="update_status">
                 <input type="hidden" name="user_id" id="modal_user_id">
                 
-                <!-- Status Update -->
-                <div class="mb-6">
-                    <h4 class="font-medium text-white mb-3">Update Status</h4>
-                    <div class="space-y-2">
-                        <input type="hidden" name="action" value="update_status">
-                        <label class="flex items-center space-x-2">
-                            <input type="radio" name="status" value="active" class="text-emerald-600">
-                            <span class="text-emerald-400">Active</span>
-                        </label>
-                        <label class="flex items-center space-x-2">
-                            <input type="radio" name="status" value="suspended" class="text-yellow-600">
-                            <span class="text-yellow-400">Suspended</span>
-                        </label>
-                        <label class="flex items-center space-x-2">
-                            <input type="radio" name="status" value="banned" class="text-red-600">
-                            <span class="text-red-400">Banned</span>
-                        </label>
-                    </div>
-                    <button type="submit" class="mt-3 w-full px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition">
-                        Update Status
-                    </button>
+                <h4 class="font-medium text-white mb-3">Update Status</h4>
+                <div class="space-y-2 mb-4">
+                    <label class="flex items-center space-x-2">
+                        <input type="radio" name="status" value="active" class="text-emerald-600" id="status_active">
+                        <span class="text-emerald-400">Active</span>
+                    </label>
+                    <label class="flex items-center space-x-2">
+                        <input type="radio" name="status" value="suspended" class="text-yellow-600" id="status_suspended">
+                        <span class="text-yellow-400">Suspended</span>
+                    </label>
+                    <label class="flex items-center space-x-2">
+                        <input type="radio" name="status" value="banned" class="text-red-600" id="status_banned">
+                        <span class="text-red-400">Banned</span>
+                    </label>
                 </div>
+                <button type="submit" class="w-full px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition">
+                    Update Status
+                </button>
             </form>
 
             <!-- Balance Adjustment -->
@@ -600,67 +672,205 @@ $stats = $stmt->fetch();
         </div>
     </div>
 
+    <!-- Notification Modal -->
+    <div id="notificationModal" class="modal">
+        <div class="glass-card rounded-xl p-6 max-w-md w-full m-4">
+            <div class="flex items-center justify-between mb-6">
+                <h3 class="text-xl font-bold text-white">Send Notification</h3>
+                <button type="button" onclick="closeModal('notificationModal')" class="text-gray-400 hover:text-white transition">
+                    <i class="fas fa-times text-xl"></i>
+                </button>
+            </div>
+            
+            <div class="mb-4">
+                <h4 class="font-medium text-white" id="notificationUserName">User Name</h4>
+            </div>
+
+            <form method="POST">
+                <input type="hidden" name="csrf_token" value="<?php echo generateCSRFToken(); ?>">
+                <input type="hidden" name="action" value="send_notification">
+                <input type="hidden" name="user_id" id="notification_user_id">
+                
+                <div class="space-y-4">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-300 mb-2">Title *</label>
+                        <input 
+                            type="text" 
+                            name="notification_title" 
+                            class="w-full px-3 py-2 bg-gray-800 border border-gray-600 rounded text-white focus:border-emerald-500 focus:outline-none"
+                            placeholder="Notification title"
+                            required
+                        >
+                    </div>
+                    
+                    <div>
+                        <label class="block text-sm font-medium text-gray-300 mb-2">Message *</label>
+                        <textarea 
+                            name="notification_message" 
+                            rows="4"
+                            class="w-full px-3 py-2 bg-gray-800 border border-gray-600 rounded text-white focus:border-emerald-500 focus:outline-none"
+                            placeholder="Enter your message..."
+                            required
+                        ></textarea>
+                    </div>
+                    
+                    <div>
+                        <label class="block text-sm font-medium text-gray-300 mb-2">Type</label>
+                        <select name="notification_type" class="w-full px-3 py-2 bg-gray-800 border border-gray-600 rounded text-white focus:border-emerald-500 focus:outline-none">
+                            <option value="info">Info</option>
+                            <option value="success">Success</option>
+                            <option value="warning">Warning</option>
+                            <option value="error">Error</option>
+                        </select>
+                    </div>
+                </div>
+                
+                <div class="flex space-x-3 mt-6">
+                    <button type="submit" class="flex-1 px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-medium transition">
+                        <i class="fas fa-paper-plane mr-2"></i>Send Notification
+                    </button>
+                    <button type="button" onclick="closeModal('notificationModal')" class="px-4 py-2 bg-gray-600 hover:bg-gray-700 text-white rounded-lg font-medium transition">
+                        Cancel
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+
     <script>
-        function openUserModal(userId) {
+        // Global variables
+        let currentModal = null;
+        
+        // Modal functions
+        function openUserModal(userId, userName, userStatus, userBalance) {
             document.getElementById('modal_user_id').value = userId;
             document.getElementById('balance_user_id').value = userId;
+            document.getElementById('modalUserName').textContent = userName;
+            document.getElementById('modalUserBalance').textContent = 'KSh ' + parseFloat(userBalance).toLocaleString();
+            
+            // Set current status
+            document.getElementById('status_' + userStatus).checked = true;
+            
             document.getElementById('userModal').classList.add('show');
+            currentModal = 'userModal';
         }
 
-        function closeUserModal() {
-            document.getElementById('userModal').classList.remove('show');
+        function openNotificationModal(userId, userName) {
+            document.getElementById('notification_user_id').value = userId;
+            document.getElementById('notificationUserName').textContent = userName;
+            
+            document.getElementById('notificationModal').classList.add('show');
+            currentModal = 'notificationModal';
         }
 
-        function viewUserDetails(userId) {
-            // Redirect to user details page
-            window.location.href = `/admin/user-details.php?id=${userId}`;
+        function closeModal(modalId = null) {
+            const modal = modalId || currentModal;
+            if (modal) {
+                document.getElementById(modal).classList.remove('show');
+                currentModal = null;
+            }
         }
 
-        // Close modal when clicking outside
-        document.getElementById('userModal').addEventListener('click', function(e) {
-            if (e.target === this) {
-                closeUserModal();
+        // Event listeners
+        document.addEventListener('DOMContentLoaded', function() {
+            // Close modals when clicking outside
+            document.querySelectorAll('.modal').forEach(modal => {
+                modal.addEventListener('click', function(e) {
+                    if (e.target === this) {
+                        closeModal(this.id);
+                    }
+                });
+            });
+
+            // Form validation for balance adjustment
+            document.querySelectorAll('form').forEach(form => {
+                form.addEventListener('submit', function(e) {
+                    const action = this.querySelector('input[name="action"]')?.value;
+                    const status = this.querySelector('input[name="status"]:checked')?.value;
+                    const balanceType = this.querySelector('input[name="balance_type"]:checked')?.value;
+                    
+                    if (action === 'update_status' && (status === 'suspended' || status === 'banned')) {
+                        if (!confirm(`Are you sure you want to ${status} this user?`)) {
+                            e.preventDefault();
+                        }
+                    }
+                    
+                    if (action === 'adjust_balance' && balanceType === 'debit') {
+                        const amount = this.querySelector('input[name="amount"]').value;
+                        if (!confirm(`Are you sure you want to debit KSh ${amount} from this user's account?`)) {
+                            e.preventDefault();
+                        }
+                    }
+                });
+            });
+
+            // Keyboard shortcuts
+            document.addEventListener('keydown', function(e) {
+                if (e.key === 'Escape') {
+                    closeModal();
+                }
+            });
+
+            // Enhanced search with debounce
+            let searchTimeout;
+            const searchInput = document.querySelector('input[name="search"]');
+            if (searchInput) {
+                searchInput.addEventListener('input', function() {
+                    clearTimeout(searchTimeout);
+                    searchTimeout = setTimeout(() => {
+                        if (this.value.length >= 3 || this.value.length === 0) {
+                            this.form.submit();
+                        }
+                    }, 1000);
+                });
             }
         });
 
-        // Confirm dangerous actions
-        document.querySelectorAll('form').forEach(form => {
-            form.addEventListener('submit', function(e) {
-                const action = this.querySelector('input[name="action"]')?.value;
-                const status = this.querySelector('input[name="status"]:checked')?.value;
-                const balanceType = this.querySelector('input[name="balance_type"]:checked')?.value;
-                
-                if (action === 'update_status' && (status === 'suspended' || status === 'banned')) {
-                    if (!confirm(`Are you sure you want to ${status} this user?`)) {
-                        e.preventDefault();
-                    }
-                }
-                
-                if (action === 'adjust_balance' && balanceType === 'debit') {
-                    const amount = this.querySelector('input[name="amount"]').value;
-                    if (!confirm(`Are you sure you want to debit KSh ${amount} from this user's account?`)) {
-                        e.preventDefault();
-                    }
-                }
-            });
-        });
+        // Format numbers
+        function formatMoney(amount) {
+            return 'KSh ' + parseFloat(amount).toLocaleString();
+        }
+
+        // Bulk actions (for future implementation)
+        function bulkUpdateStatus(status) {
+            const checkedUsers = document.querySelectorAll('input[name="selected_users[]"]:checked');
+            if (checkedUsers.length === 0) {
+                alert('Please select users to update.');
+                return;
+            }
+            
+            if (confirm(`Are you sure you want to ${status} ${checkedUsers.length} user(s)?`)) {
+                // Implementation for bulk status update
+                console.log('Bulk update:', status, checkedUsers.length, 'users');
+            }
+        }
+
+        // Export functionality
+        function exportUsers() {
+            const currentUrl = new URL(window.location.href);
+            currentUrl.searchParams.set('export', 'csv');
+            window.location.href = currentUrl.toString();
+        }
+
+        // Real-time user count updates
+        function updateUserCounts() {
+            // This could fetch updated counts via AJAX without full page reload
+            fetch('/admin/api/user-counts.php')
+                .then(response => response.json())
+                .then(data => {
+                    // Update the statistics cards
+                    document.querySelector('.active-users-count').textContent = data.active_users;
+                    document.querySelector('.total-users-count').textContent = data.total_users;
+                })
+                .catch(error => console.error('Failed to update user counts:', error));
+        }
 
         // Auto-refresh every 60 seconds
-        setTimeout(() => {
-            location.reload();
+        setInterval(function() {
+            if (!currentModal) {
+                location.reload();
+            }
         }, 60000);
-
-        // Enhanced search with debounce
-        let searchTimeout;
-        const searchInput = document.querySelector('input[name="search"]');
-        if (searchInput) {
-            searchInput.addEventListener('input', function() {
-                clearTimeout(searchTimeout);
-                searchTimeout = setTimeout(() => {
-                    this.form.submit();
-                }, 1000);
-            });
-        }
     </script>
 </body>
 </html>
