@@ -6,91 +6,149 @@ $error = '';
 $success = '';
 
 // Handle ticket actions
-if ($_POST) {
-    if (!verifyCSRFToken($_POST['csrf_token'] ?? '')) {
+if ($_POST && isset($_POST['csrf_token'])) {
+    if (!verifyCSRFToken($_POST['csrf_token'])) {
         $error = 'Invalid request. Please try again.';
     } else {
         $action = $_POST['action'] ?? '';
-        $ticket_id = (int)($_POST['ticket_id'] ?? 0);
+        $ticket_id = intval($_POST['ticket_id'] ?? 0);
         
         switch ($action) {
-            case 'respond_ticket':
-                $response = sanitize($_POST['response'] ?? '');
-                $new_status = sanitize($_POST['status'] ?? 'in_progress');
+            case 'update_status':
+                $new_status = $_POST['status'] ?? '';
+                $admin_response = trim($_POST['admin_response'] ?? '');
                 
-                if (empty($response)) {
-                    $error = 'Please enter a response.';
-                } else {
-                    // Get ticket details
-                    $stmt = $db->prepare("SELECT * FROM support_tickets WHERE id = ?");
+                if (!in_array($new_status, ['open', 'in_progress', 'resolved', 'closed'])) {
+                    $error = 'Invalid status selected.';
+                    break;
+                }
+                
+                try {
+                    $db->beginTransaction();
+                    
+                    // Update ticket status
+                    $stmt = $db->prepare("
+                        UPDATE support_tickets 
+                        SET status = ?, updated_at = NOW(), admin_id = ?, last_response_by = 'admin'
+                        WHERE id = ?
+                    ");
+                    $stmt->execute([$new_status, $_SESSION['user_id'], $ticket_id]);
+                    
+                    // Add response if provided
+                    if ($admin_response) {
+                        $stmt = $db->prepare("
+                            INSERT INTO ticket_responses (ticket_id, user_id, response_text, is_admin, created_at) 
+                            VALUES (?, ?, ?, 1, NOW())
+                        ");
+                        $stmt->execute([$ticket_id, $_SESSION['user_id'], $admin_response]);
+                    }
+                    
+                    // Get ticket details for notification
+                    $stmt = $db->prepare("
+                        SELECT t.*, u.full_name, u.email 
+                        FROM support_tickets t 
+                        JOIN users u ON t.user_id = u.id 
+                        WHERE t.id = ?
+                    ");
                     $stmt->execute([$ticket_id]);
-                    $ticket = $stmt->fetch();
+                    $ticket = $stmt->fetch(PDO::FETCH_ASSOC);
                     
                     if ($ticket) {
-                        $stmt = $db->prepare("
-                            UPDATE support_tickets 
-                            SET admin_response = ?, status = ?, responded_by = ?, updated_at = NOW() 
-                            WHERE id = ?
-                        ");
+                        // Send notification to user
+                        $status_message = match($new_status) {
+                            'in_progress' => 'Your support ticket is now being worked on by our team.',
+                            'resolved' => 'Your support ticket has been resolved. Please check the response.',
+                            'closed' => 'Your support ticket has been closed.',
+                            default => 'Your support ticket status has been updated.'
+                        };
                         
-                        if ($stmt->execute([$response, $new_status, $_SESSION['user_id'], $ticket_id])) {
-                            $success = 'Response sent successfully.';
-                            
-                            // Send notification to user
-                            sendNotification(
-                                $ticket['user_id'],
-                                'Support Ticket Updated',
-                                "Your support ticket #$ticket_id has been updated with a new response.",
-                                'info'
-                            );
-                        } else {
-                            $error = 'Failed to send response.';
-                        }
-                    } else {
-                        $error = 'Ticket not found.';
+                        sendNotification(
+                            $ticket['user_id'],
+                            'Ticket Update - #' . $ticket['ticket_number'],
+                            $status_message,
+                            'info'
+                        );
                     }
+                    
+                    $db->commit();
+                    $success = 'Ticket updated successfully.';
+                } catch (Exception $e) {
+                    if ($db->inTransaction()) {
+                        $db->rollBack();
+                    }
+                    $error = 'Failed to update ticket: ' . $e->getMessage();
                 }
                 break;
                 
-            case 'update_status':
-                $new_status = sanitize($_POST['status'] ?? '');
-                $valid_statuses = ['open', 'in_progress', 'resolved', 'closed'];
+            case 'add_response':
+                $response_text = trim($_POST['response_text'] ?? '');
                 
-                if (in_array($new_status, $valid_statuses)) {
+                if (empty($response_text)) {
+                    $error = 'Please provide a response.';
+                    break;
+                }
+                
+                try {
+                    $db->beginTransaction();
+                    
+                    // Add response
+                    $stmt = $db->prepare("
+                        INSERT INTO ticket_responses (ticket_id, user_id, response_text, is_admin, created_at) 
+                        VALUES (?, ?, ?, 1, NOW())
+                    ");
+                    $stmt->execute([$ticket_id, $_SESSION['user_id'], $response_text]);
+                    
+                    // Update ticket
                     $stmt = $db->prepare("
                         UPDATE support_tickets 
-                        SET status = ?, updated_at = NOW() 
+                        SET status = CASE WHEN status = 'closed' THEN 'in_progress' ELSE status END,
+                            updated_at = NOW(), admin_id = ?, last_response_by = 'admin'
                         WHERE id = ?
                     ");
+                    $stmt->execute([$_SESSION['user_id'], $ticket_id]);
                     
-                    if ($stmt->execute([$new_status, $ticket_id])) {
-                        $success = 'Ticket status updated successfully.';
-                    } else {
-                        $error = 'Failed to update ticket status.';
+                    // Get ticket details for notification
+                    $stmt = $db->prepare("
+                        SELECT user_id, ticket_number 
+                        FROM support_tickets 
+                        WHERE id = ?
+                    ");
+                    $stmt->execute([$ticket_id]);
+                    $ticket = $stmt->fetch(PDO::FETCH_ASSOC);
+                    
+                    if ($ticket) {
+                        sendNotification(
+                            $ticket['user_id'],
+                            'New Response - Ticket #' . $ticket['ticket_number'],
+                            'An admin has responded to your support ticket.',
+                            'info'
+                        );
                     }
-                } else {
-                    $error = 'Invalid status selected.';
+                    
+                    $db->commit();
+                    $success = 'Response added successfully.';
+                } catch (Exception $e) {
+                    if ($db->inTransaction()) {
+                        $db->rollBack();
+                    }
+                    $error = 'Failed to add response: ' . $e->getMessage();
                 }
                 break;
                 
-            case 'update_priority':
-                $new_priority = sanitize($_POST['priority'] ?? '');
-                $valid_priorities = ['low', 'medium', 'high', 'urgent'];
+            case 'assign_ticket':
+                $assign_to = intval($_POST['assign_to'] ?? 0);
                 
-                if (in_array($new_priority, $valid_priorities)) {
+                try {
                     $stmt = $db->prepare("
                         UPDATE support_tickets 
-                        SET priority = ?, updated_at = NOW() 
+                        SET admin_id = ?, status = CASE WHEN status = 'open' THEN 'in_progress' ELSE status END, updated_at = NOW()
                         WHERE id = ?
                     ");
+                    $stmt->execute([$assign_to, $ticket_id]);
                     
-                    if ($stmt->execute([$new_priority, $ticket_id])) {
-                        $success = 'Ticket priority updated successfully.';
-                    } else {
-                        $error = 'Failed to update ticket priority.';
-                    }
-                } else {
-                    $error = 'Invalid priority selected.';
+                    $success = 'Ticket assigned successfully.';
+                } catch (Exception $e) {
+                    $error = 'Failed to assign ticket: ' . $e->getMessage();
                 }
                 break;
         }
@@ -100,7 +158,9 @@ if ($_POST) {
 // Get filter parameters
 $status_filter = $_GET['status'] ?? 'all';
 $priority_filter = $_GET['priority'] ?? 'all';
-$page = max(1, (int)($_GET['page'] ?? 1));
+$category_filter = $_GET['category'] ?? 'all';
+$search = trim($_GET['search'] ?? '');
+$page = max(1, intval($_GET['page'] ?? 1));
 $limit = 20;
 $offset = ($page - 1) * $limit;
 
@@ -109,62 +169,114 @@ $where_conditions = ["1=1"];
 $params = [];
 
 if ($status_filter !== 'all') {
-    $where_conditions[] = "st.status = ?";
+    $where_conditions[] = "t.status = ?";
     $params[] = $status_filter;
 }
 
 if ($priority_filter !== 'all') {
-    $where_conditions[] = "st.priority = ?";
+    $where_conditions[] = "t.priority = ?";
     $params[] = $priority_filter;
+}
+
+if ($category_filter !== 'all') {
+    $where_conditions[] = "t.category = ?";
+    $params[] = $category_filter;
+}
+
+if ($search) {
+    $where_conditions[] = "(u.full_name LIKE ? OR u.email LIKE ? OR t.subject LIKE ? OR t.ticket_number LIKE ?)";
+    $search_param = "%$search%";
+    $params[] = $search_param;
+    $params[] = $search_param;
+    $params[] = $search_param;
+    $params[] = $search_param;
 }
 
 $where_clause = implode(' AND ', $where_conditions);
 
-// Get total count
-$count_sql = "SELECT COUNT(*) as total FROM support_tickets st WHERE $where_clause";
-$stmt = $db->prepare($count_sql);
-$stmt->execute($params);
-$total_records = $stmt->fetch()['total'];
-$total_pages = ceil($total_records / $limit);
-
 // Get tickets
-$sql = "
-    SELECT st.*, 
-           u.full_name, u.email,
-           admin.full_name as admin_name
-    FROM support_tickets st
-    JOIN users u ON st.user_id = u.id
-    LEFT JOIN users admin ON st.responded_by = admin.id
-    WHERE $where_clause
-    ORDER BY 
-        CASE st.priority 
-            WHEN 'urgent' THEN 1
-            WHEN 'high' THEN 2 
-            WHEN 'medium' THEN 3
-            WHEN 'low' THEN 4
-        END,
-        st.created_at DESC
-    LIMIT $limit OFFSET $offset
-";
+$tickets = [];
+$total_records = 0;
+$total_pages = 1;
 
-$stmt = $db->prepare($sql);
-$stmt->execute($params);
-$tickets = $stmt->fetchAll();
+try {
+    // Get total count
+    $count_sql = "
+        SELECT COUNT(*) as total 
+        FROM support_tickets t 
+        JOIN users u ON t.user_id = u.id 
+        WHERE $where_clause
+    ";
+    $stmt = $db->prepare($count_sql);
+    $stmt->execute($params);
+    $result = $stmt->fetch();
+    $total_records = $result ? $result['total'] : 0;
+    $total_pages = ceil($total_records / $limit);
 
-// Get summary statistics
-$stats_sql = "
-    SELECT 
-        COUNT(*) as total_tickets,
-        COUNT(CASE WHEN status = 'open' THEN 1 END) as open_tickets,
-        COUNT(CASE WHEN status = 'in_progress' THEN 1 END) as in_progress_tickets,
-        COUNT(CASE WHEN status = 'resolved' THEN 1 END) as resolved_tickets,
-        COUNT(CASE WHEN status = 'closed' THEN 1 END) as closed_tickets,
-        COUNT(CASE WHEN priority = 'urgent' THEN 1 END) as urgent_tickets,
-        COUNT(CASE WHEN created_at >= DATE_SUB(NOW(), INTERVAL 24 HOUR) THEN 1 END) as tickets_24h
-    FROM support_tickets
-";
-$stmt = $db->query($stats_sql);
-$stats = $stmt->fetch();
+    // Get tickets
+    $sql = "
+        SELECT t.*, u.full_name, u.email, u.phone,
+               admin.full_name as admin_name,
+               (SELECT COUNT(*) FROM ticket_responses WHERE ticket_id = t.id) as response_count
+        FROM support_tickets t
+        JOIN users u ON t.user_id = u.id
+        LEFT JOIN users admin ON t.admin_id = admin.id
+        WHERE $where_clause
+        ORDER BY 
+            CASE t.priority 
+                WHEN 'urgent' THEN 1 
+                WHEN 'high' THEN 2 
+                WHEN 'medium' THEN 3 
+                WHEN 'low' THEN 4 
+            END,
+            t.created_at DESC
+        LIMIT $limit OFFSET $offset
+    ";
+
+    $stmt = $db->prepare($sql);
+    $stmt->execute($params);
+    $tickets = $stmt->fetchAll(PDO::FETCH_ASSOC);
+} catch (Exception $e) {
+    $error = 'Failed to load tickets: ' . $e->getMessage();
+}
+
+// Get statistics
+$stats = [
+    'total_tickets' => 0,
+    'open_tickets' => 0,
+    'in_progress_tickets' => 0,
+    'urgent_tickets' => 0,
+    'unassigned_tickets' => 0,
+    'avg_response_time' => 0
+];
+
+try {
+    $stats_sql = "
+        SELECT 
+            COUNT(*) as total_tickets,
+            SUM(CASE WHEN status = 'open' THEN 1 ELSE 0 END) as open_tickets,
+            SUM(CASE WHEN status = 'in_progress' THEN 1 ELSE 0 END) as in_progress_tickets,
+            SUM(CASE WHEN priority = 'urgent' AND status NOT IN ('resolved', 'closed') THEN 1 ELSE 0 END) as urgent_tickets,
+            SUM(CASE WHEN admin_id IS NULL AND status NOT IN ('resolved', 'closed') THEN 1 ELSE 0 END) as unassigned_tickets
+        FROM support_tickets
+    ";
+    $stmt = $db->query($stats_sql);
+    $result = $stmt->fetch(PDO::FETCH_ASSOC);
+    if ($result) {
+        $stats = array_merge($stats, $result);
+    }
+} catch (Exception $e) {
+    // Use default stats
+}
+
+// Get admin users for assignment
+$admins = [];
+try {
+    $stmt = $db->query("SELECT id, full_name FROM users WHERE role = 'admin' ORDER BY full_name");
+    $admins = $stmt->fetchAll(PDO::FETCH_ASSOC);
+} catch (Exception $e) {
+    // Continue without admin list
+}
 ?>
 
 <!DOCTYPE html>
@@ -185,22 +297,26 @@ $stats = $stmt->fetch();
             border: 1px solid rgba(255, 255, 255, 0.1);
         }
         
-        .ticket-card {
-            transition: all 0.3s ease;
-        }
-        
-        .ticket-card:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 10px 25px rgba(0, 0, 0, 0.3);
-        }
-        
         .modal {
             display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.5);
             backdrop-filter: blur(10px);
+            z-index: 1000;
         }
         
         .modal.show {
-            display: flex;
+            display: flex !important;
+            align-items: center;
+            justify-content: center;
+        }
+        
+        .ticket-row:hover {
+            background: rgba(255, 255, 255, 0.05);
         }
         
         .priority-urgent { border-left: 4px solid #ef4444; }
@@ -231,7 +347,8 @@ $stats = $stmt->fetch();
                         <a href="/admin/users.php" class="text-gray-300 hover:text-emerald-400 transition">Users</a>
                         <a href="/admin/packages.php" class="text-gray-300 hover:text-emerald-400 transition">Packages</a>
                         <a href="/admin/transactions.php" class="text-gray-300 hover:text-emerald-400 transition">Transactions</a>
-                        <a href="/admin/tickets.php" class="text-emerald-400 font-medium">Support</a>
+                        <a href="/admin/tickets.php" class="text-emerald-400 font-medium">Support Tickets</a>
+                        <a href="/admin/system-health.php" class="text-gray-300 hover:text-emerald-400 transition">System Health</a>
                     </nav>
                 </div>
 
@@ -256,7 +373,7 @@ $stats = $stmt->fetch();
         <div class="flex items-center justify-between mb-8">
             <div>
                 <h1 class="text-3xl font-bold text-white">Support Tickets</h1>
-                <p class="text-gray-400">Manage customer support requests</p>
+                <p class="text-gray-400">Manage customer support requests and inquiries</p>
             </div>
             <div class="text-right">
                 <p class="text-2xl font-bold text-emerald-400"><?php echo number_format($stats['total_tickets']); ?></p>
@@ -269,7 +386,7 @@ $stats = $stmt->fetch();
         <div class="mb-6 p-4 bg-red-500/20 border border-red-500/50 rounded-lg">
             <div class="flex items-center">
                 <i class="fas fa-exclamation-circle text-red-400 mr-2"></i>
-                <span class="text-red-300"><?php echo $error; ?></span>
+                <span class="text-red-300"><?php echo htmlspecialchars($error); ?></span>
             </div>
         </div>
         <?php endif; ?>
@@ -278,68 +395,51 @@ $stats = $stmt->fetch();
         <div class="mb-6 p-4 bg-emerald-500/20 border border-emerald-500/50 rounded-lg">
             <div class="flex items-center">
                 <i class="fas fa-check-circle text-emerald-400 mr-2"></i>
-                <span class="text-emerald-300"><?php echo $success; ?></span>
+                <span class="text-emerald-300"><?php echo htmlspecialchars($success); ?></span>
             </div>
         </div>
         <?php endif; ?>
 
         <!-- Statistics Overview -->
-        <section class="grid md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
+        <section class="grid md:grid-cols-2 lg:grid-cols-5 gap-6 mb-8">
             <div class="glass-card rounded-xl p-6">
-                <div class="flex items-center justify-between">
-                    <div>
-                        <p class="text-gray-400 text-sm">Open Tickets</p>
-                        <p class="text-3xl font-bold text-yellow-400"><?php echo number_format($stats['open_tickets']); ?></p>
-                    </div>
-                    <div class="w-12 h-12 bg-yellow-500/20 rounded-full flex items-center justify-center">
-                        <i class="fas fa-ticket-alt text-yellow-400 text-xl"></i>
-                    </div>
+                <div class="text-center">
+                    <p class="text-blue-400 text-2xl font-bold"><?php echo number_format($stats['open_tickets']); ?></p>
+                    <p class="text-gray-400 text-sm">Open</p>
                 </div>
             </div>
-
             <div class="glass-card rounded-xl p-6">
-                <div class="flex items-center justify-between">
-                    <div>
-                        <p class="text-gray-400 text-sm">In Progress</p>
-                        <p class="text-3xl font-bold text-blue-400"><?php echo number_format($stats['in_progress_tickets']); ?></p>
-                    </div>
-                    <div class="w-12 h-12 bg-blue-500/20 rounded-full flex items-center justify-center">
-                        <i class="fas fa-clock text-blue-400 text-xl"></i>
-                    </div>
+                <div class="text-center">
+                    <p class="text-yellow-400 text-2xl font-bold"><?php echo number_format($stats['in_progress_tickets']); ?></p>
+                    <p class="text-gray-400 text-sm">In Progress</p>
                 </div>
             </div>
-
             <div class="glass-card rounded-xl p-6">
-                <div class="flex items-center justify-between">
-                    <div>
-                        <p class="text-gray-400 text-sm">Urgent</p>
-                        <p class="text-3xl font-bold text-red-400"><?php echo number_format($stats['urgent_tickets']); ?></p>
-                    </div>
-                    <div class="w-12 h-12 bg-red-500/20 rounded-full flex items-center justify-center">
-                        <i class="fas fa-exclamation-triangle text-red-400 text-xl"></i>
-                    </div>
+                <div class="text-center">
+                    <p class="text-red-400 text-2xl font-bold"><?php echo number_format($stats['urgent_tickets']); ?></p>
+                    <p class="text-gray-400 text-sm">Urgent</p>
                 </div>
             </div>
-
             <div class="glass-card rounded-xl p-6">
-                <div class="flex items-center justify-between">
-                    <div>
-                        <p class="text-gray-400 text-sm">Last 24h</p>
-                        <p class="text-3xl font-bold text-purple-400"><?php echo number_format($stats['tickets_24h']); ?></p>
-                    </div>
-                    <div class="w-12 h-12 bg-purple-500/20 rounded-full flex items-center justify-center">
-                        <i class="fas fa-history text-purple-400 text-xl"></i>
-                    </div>
+                <div class="text-center">
+                    <p class="text-purple-400 text-2xl font-bold"><?php echo number_format($stats['unassigned_tickets']); ?></p>
+                    <p class="text-gray-400 text-sm">Unassigned</p>
+                </div>
+            </div>
+            <div class="glass-card rounded-xl p-6">
+                <div class="text-center">
+                    <p class="text-emerald-400 text-2xl font-bold"><?php echo number_format($stats['total_tickets']); ?></p>
+                    <p class="text-gray-400 text-sm">Total</p>
                 </div>
             </div>
         </section>
 
         <!-- Filters -->
         <section class="glass-card rounded-xl p-6 mb-8">
-            <form method="GET" class="grid md:grid-cols-3 gap-4">
+            <form method="GET" class="grid md:grid-cols-5 gap-4">
                 <!-- Status Filter -->
                 <div>
-                    <label class="block text-sm font-medium text-gray-300 mb-2">Status Filter</label>
+                    <label class="block text-sm font-medium text-gray-300 mb-2">Status</label>
                     <select name="status" class="w-full px-3 py-2 bg-gray-800 border border-gray-600 rounded text-white focus:border-emerald-500 focus:outline-none">
                         <option value="all" <?php echo $status_filter === 'all' ? 'selected' : ''; ?>>All Status</option>
                         <option value="open" <?php echo $status_filter === 'open' ? 'selected' : ''; ?>>Open</option>
@@ -351,7 +451,7 @@ $stats = $stmt->fetch();
 
                 <!-- Priority Filter -->
                 <div>
-                    <label class="block text-sm font-medium text-gray-300 mb-2">Priority Filter</label>
+                    <label class="block text-sm font-medium text-gray-300 mb-2">Priority</label>
                     <select name="priority" class="w-full px-3 py-2 bg-gray-800 border border-gray-600 rounded text-white focus:border-emerald-500 focus:outline-none">
                         <option value="all" <?php echo $priority_filter === 'all' ? 'selected' : ''; ?>>All Priorities</option>
                         <option value="urgent" <?php echo $priority_filter === 'urgent' ? 'selected' : ''; ?>>Urgent</option>
@@ -361,209 +461,250 @@ $stats = $stmt->fetch();
                     </select>
                 </div>
 
+                <!-- Category Filter -->
+                <div>
+                    <label class="block text-sm font-medium text-gray-300 mb-2">Category</label>
+                    <select name="category" class="w-full px-3 py-2 bg-gray-800 border border-gray-600 rounded text-white focus:border-emerald-500 focus:outline-none">
+                        <option value="all" <?php echo $category_filter === 'all' ? 'selected' : ''; ?>>All Categories</option>
+                        <option value="technical" <?php echo $category_filter === 'technical' ? 'selected' : ''; ?>>Technical</option>
+                        <option value="billing" <?php echo $category_filter === 'billing' ? 'selected' : ''; ?>>Billing</option>
+                        <option value="account" <?php echo $category_filter === 'account' ? 'selected' : ''; ?>>Account</option>
+                        <option value="general" <?php echo $category_filter === 'general' ? 'selected' : ''; ?>>General</option>
+                    </select>
+                </div>
+
+                <!-- Search -->
+                <div>
+                    <label class="block text-sm font-medium text-gray-300 mb-2">Search</label>
+                    <input 
+                        type="text" 
+                        name="search" 
+                        value="<?php echo htmlspecialchars($search); ?>"
+                        placeholder="Ticket #, user, subject..."
+                        class="w-full px-3 py-2 bg-gray-800 border border-gray-600 rounded text-white focus:border-emerald-500 focus:outline-none"
+                    >
+                </div>
+
                 <!-- Submit -->
                 <div class="flex items-end">
                     <button type="submit" class="w-full px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded font-medium transition">
-                        <i class="fas fa-filter mr-2"></i>Apply Filters
+                        <i class="fas fa-search mr-2"></i>Filter
                     </button>
                 </div>
             </form>
         </section>
 
-        <!-- Tickets List -->
-        <section class="space-y-4">
-            <?php if (empty($tickets)): ?>
-                <div class="glass-card rounded-xl p-12 text-center">
-                    <i class="fas fa-ticket-alt text-6xl text-gray-600 mb-4"></i>
-                    <h3 class="text-xl font-bold text-gray-400 mb-2">No tickets found</h3>
-                    <p class="text-gray-500">No support tickets match your current filters</p>
-                </div>
-            <?php else: ?>
-                <?php foreach ($tickets as $ticket): ?>
-                <div class="ticket-card glass-card rounded-xl p-6 priority-<?php echo $ticket['priority']; ?>">
-                    <div class="flex items-start justify-between mb-4">
-                        <div class="flex-1">
-                            <div class="flex items-center space-x-3 mb-2">
-                                <h3 class="text-xl font-bold text-white"><?php echo htmlspecialchars($ticket['subject']); ?></h3>
-                                <span class="text-gray-400 text-sm">#<?php echo $ticket['id']; ?></span>
-                            </div>
-                            <div class="flex items-center space-x-4 text-sm text-gray-400 mb-3">
-                                <span><i class="fas fa-user mr-1"></i><?php echo htmlspecialchars($ticket['full_name']); ?></span>
-                                <span><i class="fas fa-envelope mr-1"></i><?php echo htmlspecialchars($ticket['email']); ?></span>
-                                <span><i class="fas fa-clock mr-1"></i><?php echo timeAgo($ticket['created_at']); ?></span>
-                            </div>
-                            <p class="text-gray-300 mb-4"><?php echo nl2br(htmlspecialchars(substr($ticket['message'], 0, 300))); ?>...</p>
-                            
-                            <?php if ($ticket['admin_response']): ?>
-                                <div class="bg-emerald-500/10 border border-emerald-500/30 rounded-lg p-4 mb-4">
-                                    <h4 class="text-emerald-400 font-medium mb-2">Your Response:</h4>
-                                    <p class="text-gray-300 text-sm"><?php echo nl2br(htmlspecialchars($ticket['admin_response'])); ?></p>
+        <!-- Tickets Table -->
+        <section class="glass-card rounded-xl overflow-hidden">
+            <?php if (!empty($tickets)): ?>
+                <div class="overflow-x-auto">
+                    <table class="w-full">
+                        <thead class="bg-gray-800/50">
+                            <tr>
+                                <th class="text-left p-4 text-gray-400 font-medium">Ticket</th>
+                                <th class="text-left p-4 text-gray-400 font-medium">User</th>
+                                <th class="text-center p-4 text-gray-400 font-medium">Priority</th>
+                                <th class="text-center p-4 text-gray-400 font-medium">Status</th>
+                                <th class="text-left p-4 text-gray-400 font-medium">Subject</th>
+                                <th class="text-center p-4 text-gray-400 font-medium">Assigned To</th>
+                                <th class="text-center p-4 text-gray-400 font-medium">Responses</th>
+                                <th class="text-center p-4 text-gray-400 font-medium">Created</th>
+                                <th class="text-center p-4 text-gray-400 font-medium">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <?php foreach ($tickets as $ticket): ?>
+                            <tr class="ticket-row border-b border-gray-800 priority-<?php echo $ticket['priority']; ?>">
+                                <!-- Ticket Column -->
+                                <td class="p-4">
+                                    <div>
+                                        <p class="font-bold text-emerald-400">#<?php echo htmlspecialchars($ticket['ticket_number']); ?></p>
+                                        <p class="text-xs text-gray-400"><?php echo ucfirst($ticket['category']); ?></p>
+                                    </div>
+                                </td>
+                                
+                                <!-- User Column -->
+                                <td class="p-4">
+                                    <div class="flex items-center space-x-3">
+                                        <div class="w-8 h-8 bg-gradient-to-r from-blue-500 to-purple-500 rounded-full flex items-center justify-center text-xs font-bold text-white">
+                                            <?php echo strtoupper(substr($ticket['full_name'], 0, 2)); ?>
+                                        </div>
+                                        <div>
+                                            <p class="font-medium text-white text-sm"><?php echo htmlspecialchars($ticket['full_name']); ?></p>
+                                            <p class="text-xs text-gray-400"><?php echo htmlspecialchars($ticket['email']); ?></p>
+                                        </div>
+                                    </div>
+                                </td>
+                                
+                                <!-- Priority Column -->
+                                <td class="p-4 text-center">
+                                    <span class="px-2 py-1 rounded-full text-xs font-medium
+                                        <?php 
+                                        echo match($ticket['priority']) {
+                                            'urgent' => 'bg-red-500/20 text-red-400',
+                                            'high' => 'bg-orange-500/20 text-orange-400',
+                                            'medium' => 'bg-yellow-500/20 text-yellow-400',
+                                            'low' => 'bg-green-500/20 text-green-400',
+                                            default => 'bg-gray-500/20 text-gray-400'
+                                        };
+                                        ?>">
+                                        <?php echo ucfirst($ticket['priority']); ?>
+                                    </span>
+                                </td>
+                                
+                                <!-- Status Column -->
+                                <td class="p-4 text-center">
+                                    <span class="px-2 py-1 rounded-full text-xs font-medium
+                                        <?php 
+                                        echo match($ticket['status']) {
+                                            'open' => 'bg-blue-500/20 text-blue-400',
+                                            'in_progress' => 'bg-yellow-500/20 text-yellow-400',
+                                            'resolved' => 'bg-emerald-500/20 text-emerald-400',
+                                            'closed' => 'bg-gray-500/20 text-gray-400',
+                                            default => 'bg-gray-500/20 text-gray-400'
+                                        };
+                                        ?>">
+                                        <?php echo ucfirst(str_replace('_', ' ', $ticket['status'])); ?>
+                                    </span>
+                                </td>
+                                
+                                <!-- Subject Column -->
+                                <td class="p-4">
+                                    <div class="max-w-xs">
+                                        <p class="text-white text-sm font-medium"><?php echo htmlspecialchars(substr($ticket['subject'], 0, 40)) . (strlen($ticket['subject']) > 40 ? '...' : ''); ?></p>
+                                        <p class="text-xs text-gray-400 mt-1"><?php echo htmlspecialchars(substr($ticket['message'], 0, 60)) . '...'; ?></p>
+                                    </div>
+                                </td>
+                                
+                                <!-- Assigned To Column -->
+                                <td class="p-4 text-center">
                                     <?php if ($ticket['admin_name']): ?>
-                                        <p class="text-emerald-400 text-xs mt-2">- <?php echo htmlspecialchars($ticket['admin_name']); ?></p>
+                                        <span class="text-sm text-blue-400"><?php echo htmlspecialchars($ticket['admin_name']); ?></span>
+                                    <?php else: ?>
+                                        <span class="text-sm text-gray-500">Unassigned</span>
                                     <?php endif; ?>
-                                </div>
-                            <?php endif; ?>
-                        </div>
-                        
-                        <div class="flex flex-col items-end space-y-2 ml-6">
-                            <!-- Status Badge -->
-                            <span class="px-3 py-1 rounded-full text-xs font-medium
-                                <?php 
-                                echo match($ticket['status']) {
-                                    'open' => 'bg-blue-500/20 text-blue-400',
-                                    'in_progress' => 'bg-yellow-500/20 text-yellow-400',
-                                    'resolved' => 'bg-emerald-500/20 text-emerald-400',
-                                    'closed' => 'bg-gray-500/20 text-gray-400',
-                                    default => 'bg-gray-500/20 text-gray-400'
-                                };
-                                ?>">
-                                <?php echo ucfirst(str_replace('_', ' ', $ticket['status'])); ?>
-                            </span>
-                            
-                            <!-- Priority Badge -->
-                            <span class="px-3 py-1 rounded-full text-xs font-medium
-                                <?php 
-                                echo match($ticket['priority']) {
-                                    'urgent' => 'bg-red-500/20 text-red-400',
-                                    'high' => 'bg-orange-500/20 text-orange-400',
-                                    'medium' => 'bg-yellow-500/20 text-yellow-400',
-                                    'low' => 'bg-green-500/20 text-green-400',
-                                    default => 'bg-gray-500/20 text-gray-400'
-                                };
-                                ?>">
-                                <?php echo ucfirst($ticket['priority']); ?>
-                            </span>
-                            
-                            <!-- Action Buttons -->
-                            <div class="flex space-x-2 mt-4">
-                                <button onclick="openTicketModal(<?php echo htmlspecialchars(json_encode($ticket)); ?>)" 
-                                        class="px-3 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-sm transition">
-                                    <i class="fas fa-reply mr-1"></i>Respond
-                                </button>
-                                <button onclick="quickStatusUpdate(<?php echo $ticket['id']; ?>, '<?php echo $ticket['status']; ?>')" 
-                                        class="px-3 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm transition">
-                                    <i class="fas fa-edit mr-1"></i>Update
-                                </button>
-                            </div>
-                        </div>
-                    </div>
+                                </td>
+                                
+                                <!-- Responses Column -->
+                                <td class="p-4 text-center">
+                                    <span class="px-2 py-1 bg-purple-500/20 text-purple-400 rounded-full text-xs font-medium">
+                                        <?php echo $ticket['response_count']; ?>
+                                    </span>
+                                </td>
+                                
+                                <!-- Created Column -->
+                                <td class="p-4 text-center text-gray-300 text-sm">
+                                    <p><?php echo date('M j', strtotime($ticket['created_at'])); ?></p>
+                                    <p class="text-xs text-gray-500"><?php echo date('g:i A', strtotime($ticket['created_at'])); ?></p>
+                                </td>
+                                
+                                <!-- Actions Column -->
+                                <td class="p-4 text-center">
+                                    <div class="flex items-center justify-center space-x-1">
+                                        <button onclick="viewTicket(<?php echo $ticket['id']; ?>)" 
+                                                class="px-2 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded text-xs transition">
+                                            <i class="fas fa-eye"></i>
+                                        </button>
+                                        <button onclick="updateTicket(<?php echo $ticket['id']; ?>, '<?php echo $ticket['status']; ?>')" 
+                                                class="px-2 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded text-xs transition">
+                                            <i class="fas fa-edit"></i>
+                                        </button>
+                                        <?php if (!$ticket['admin_id']): ?>
+                                        <button onclick="assignTicket(<?php echo $ticket['id']; ?>)"
+                                                class="px-2 py-1 bg-purple-600 hover:bg-purple-700 text-white rounded text-xs transition">
+                                            <i class="fas fa-user-plus"></i>
+                                        </button>
+                                        <?php endif; ?>
+                                    </div>
+                                </td>
+                            </tr>
+                            <?php endforeach; ?>
+                        </tbody>
+                    </table>
                 </div>
-                <?php endforeach; ?>
 
                 <!-- Pagination -->
                 <?php if ($total_pages > 1): ?>
-                <div class="flex items-center justify-center mt-8 space-x-2">
-                    <?php if ($page > 1): ?>
-                        <a href="?status=<?php echo $status_filter; ?>&priority=<?php echo $priority_filter; ?>&page=<?php echo $page-1; ?>" 
-                           class="px-4 py-2 bg-gray-800 text-gray-300 rounded-lg hover:bg-gray-700 transition">
-                            <i class="fas fa-chevron-left"></i>
-                        </a>
-                    <?php endif; ?>
-                    
-                    <?php
-                    $start = max(1, $page - 2);
-                    $end = min($total_pages, $page + 2);
-                    
-                    for ($i = $start; $i <= $end; $i++):
-                    ?>
-                        <a href="?status=<?php echo $status_filter; ?>&priority=<?php echo $priority_filter; ?>&page=<?php echo $i; ?>" 
-                           class="px-4 py-2 rounded-lg transition <?php echo $i === $page ? 'bg-emerald-600 text-white' : 'bg-gray-800 text-gray-300 hover:bg-gray-700'; ?>">
-                            <?php echo $i; ?>
-                        </a>
-                    <?php endfor; ?>
-                    
-                    <?php if ($page < $total_pages): ?>
-                        <a href="?status=<?php echo $status_filter; ?>&priority=<?php echo $priority_filter; ?>&page=<?php echo $page+1; ?>" 
-                           class="px-4 py-2 bg-gray-800 text-gray-300 rounded-lg hover:bg-gray-700 transition">
-                            <i class="fas fa-chevron-right"></i>
-                        </a>
-                    <?php endif; ?>
+                <div class="p-6 border-t border-gray-800">
+                    <div class="flex items-center justify-between">
+                        <div class="text-sm text-gray-400">
+                            Showing <?php echo ($offset + 1); ?> to <?php echo min($offset + $limit, $total_records); ?> of <?php echo number_format($total_records); ?> tickets
+                        </div>
+                        <div class="flex items-center space-x-2">
+                            <?php if ($page > 1): ?>
+                                <a href="?status=<?php echo htmlspecialchars($status_filter); ?>&priority=<?php echo htmlspecialchars($priority_filter); ?>&category=<?php echo htmlspecialchars($category_filter); ?>&search=<?php echo urlencode($search); ?>&page=<?php echo $page-1; ?>" 
+                                   class="px-3 py-2 bg-gray-800 text-gray-300 rounded hover:bg-gray-700 transition">
+                                    <i class="fas fa-chevron-left"></i>
+                                </a>
+                            <?php endif; ?>
+                            
+                            <?php
+                            $start = max(1, $page - 2);
+                            $end = min($total_pages, $page + 2);
+                            
+                            for ($i = $start; $i <= $end; $i++):
+                            ?>
+                                <a href="?status=<?php echo htmlspecialchars($status_filter); ?>&priority=<?php echo htmlspecialchars($priority_filter); ?>&category=<?php echo htmlspecialchars($category_filter); ?>&search=<?php echo urlencode($search); ?>&page=<?php echo $i; ?>" 
+                                   class="px-3 py-2 rounded transition <?php echo $i === $page ? 'bg-emerald-600 text-white' : 'bg-gray-800 text-gray-300 hover:bg-gray-700'; ?>">
+                                    <?php echo $i; ?>
+                                </a>
+                            <?php endfor; ?>
+                            
+                            <?php if ($page < $total_pages): ?>
+                                <a href="?status=<?php echo htmlspecialchars($status_filter); ?>&priority=<?php echo htmlspecialchars($priority_filter); ?>&category=<?php echo htmlspecialchars($category_filter); ?>&search=<?php echo urlencode($search); ?>&page=<?php echo $page+1; ?>" 
+                                   class="px-3 py-2 bg-gray-800 text-gray-300 rounded hover:bg-gray-700 transition">
+                                    <i class="fas fa-chevron-right"></i>
+                                </a>
+                            <?php endif; ?>
+                        </div>
+                    </div>
                 </div>
                 <?php endif; ?>
+            <?php else: ?>
+                <div class="p-12 text-center">
+                    <i class="fas fa-ticket-alt text-6xl text-gray-600 mb-4"></i>
+                    <h3 class="text-xl font-bold text-gray-400 mb-2">No tickets found</h3>
+                    <p class="text-gray-500">No tickets match your current filters</p>
+                </div>
             <?php endif; ?>
         </section>
     </main>
 
-    <!-- Response Modal -->
-    <div id="responseModal" class="modal fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
-        <div class="glass-card rounded-xl p-6 max-w-2xl w-full max-h-[90vh] overflow-y-auto">
-            <div class="flex items-center justify-between mb-6">
-                <h3 class="text-xl font-bold text-white">Respond to Ticket</h3>
-                <button onclick="closeModal()" class="text-gray-400 hover:text-white">
+    <!-- View Ticket Modal -->
+    <div id="viewTicketModal" class="modal">
+        <div class="glass-card rounded-xl p-0 max-w-4xl w-full m-4 max-h-[90vh] overflow-hidden">
+            <div class="flex items-center justify-between p-6 border-b border-gray-700">
+                <h3 class="text-xl font-bold text-white">Ticket Details</h3>
+                <button type="button" onclick="closeModal('viewTicketModal')" class="text-gray-400 hover:text-white transition">
                     <i class="fas fa-times text-xl"></i>
                 </button>
             </div>
             
-            <!-- Ticket Details -->
-            <div class="bg-gray-800/50 rounded-lg p-4 mb-6">
-                <h4 class="font-bold text-white mb-2" id="modal-subject"></h4>
-                <div class="grid grid-cols-2 gap-4 text-sm text-gray-400 mb-3">
-                    <div><i class="fas fa-user mr-1"></i><span id="modal-user"></span></div>
-                    <div><i class="fas fa-envelope mr-1"></i><span id="modal-email"></span></div>
-                    <div><i class="fas fa-clock mr-1"></i><span id="modal-created"></span></div>
-                    <div><i class="fas fa-ticket-alt mr-1"></i>#<span id="modal-id"></span></div>
-                </div>
-                <div class="bg-gray-700/50 rounded p-3">
-                    <h5 class="text-gray-300 font-medium mb-2">Original Message:</h5>
-                    <p class="text-gray-300 text-sm" id="modal-message"></p>
-                </div>
+            <div id="ticketContent" class="overflow-y-auto max-h-[70vh]">
+                <!-- Ticket content will be loaded here -->
+            </div>
+        </div>
+    </div>
+
+    <!-- Update Ticket Modal -->
+    <div id="updateTicketModal" class="modal">
+        <div class="glass-card rounded-xl p-6 max-w-md w-full m-4">
+            <div class="flex items-center justify-between mb-6">
+                <h3 class="text-xl font-bold text-white">Update Ticket</h3>
+                <button type="button" onclick="closeModal('updateTicketModal')" class="text-gray-400 hover:text-white transition">
+                    <i class="fas fa-times text-xl"></i>
+                </button>
             </div>
             
             <form method="POST">
                 <input type="hidden" name="csrf_token" value="<?php echo generateCSRFToken(); ?>">
-                <input type="hidden" name="action" value="respond_ticket">
-                <input type="hidden" name="ticket_id" id="modal-ticket-id">
+                <input type="hidden" name="action" value="update_status">
+                <input type="hidden" name="ticket_id" id="updateTicketId">
                 
                 <div class="space-y-4">
                     <div>
-                        <label class="block text-sm font-medium text-gray-300 mb-2">Response *</label>
-                        <textarea name="response" rows="6" 
-                                  class="w-full px-4 py-3 bg-gray-800 border border-gray-600 rounded-lg text-white focus:border-emerald-500 focus:outline-none"
-                                  placeholder="Enter your response to the customer..." required></textarea>
-                    </div>
-                    
-                    <div>
-                        <label class="block text-sm font-medium text-gray-300 mb-2">Update Status</label>
-                        <select name="status" class="w-full px-4 py-3 bg-gray-800 border border-gray-600 rounded-lg text-white focus:border-emerald-500 focus:outline-none">
-                            <option value="in_progress">In Progress</option>
-                            <option value="resolved">Resolved</option>
-                            <option value="closed">Closed</option>
-                        </select>
-                    </div>
-                </div>
-                
-                <div class="flex space-x-3 mt-6">
-                    <button type="submit" class="flex-1 px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-medium transition">
-                        <i class="fas fa-paper-plane mr-2"></i>Send Response
-                    </button>
-                    <button type="button" onclick="closeModal()" class="px-4 py-2 bg-gray-600 hover:bg-gray-700 text-white rounded-lg font-medium transition">
-                        Cancel
-                    </button>
-                </div>
-            </form>
-        </div>
-    </div>
-
-    <!-- Quick Status Update Modal -->
-    <div id="statusModal" class="modal fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
-        <div class="glass-card rounded-xl p-6 max-w-md w-full">
-            <div class="flex items-center justify-between mb-6">
-                <h3 class="text-xl font-bold text-white">Update Ticket</h3>
-                <button onclick="closeStatusModal()" class="text-gray-400 hover:text-white">
-                    <i class="fas fa-times text-xl"></i>
-                </button>
-            </div>
-            
-            <div class="space-y-4">
-                <!-- Status Update Form -->
-                <form method="POST" class="space-y-4">
-                    <input type="hidden" name="csrf_token" value="<?php echo generateCSRFToken(); ?>">
-                    <input type="hidden" name="action" value="update_status">
-                    <input type="hidden" name="ticket_id" id="status-ticket-id">
-                    
-                    <div>
-                        <label class="block text-sm font-medium text-gray-300 mb-2">Status</label>
-                        <select name="status" id="status-select" class="w-full px-4 py-3 bg-gray-800 border border-gray-600 rounded-lg text-white focus:border-emerald-500 focus:outline-none">
+                        <label class="block text-sm font-medium text-gray-300 mb-2">Status *</label>
+                        <select name="status" id="statusSelect" class="w-full px-3 py-2 bg-gray-800 border border-gray-600 rounded text-white focus:border-emerald-500 focus:outline-none" required>
                             <option value="open">Open</option>
                             <option value="in_progress">In Progress</option>
                             <option value="resolved">Resolved</option>
@@ -571,92 +712,327 @@ $stats = $stmt->fetch();
                         </select>
                     </div>
                     
-                    <button type="submit" class="w-full px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium transition">
-                        Update Status
-                    </button>
-                </form>
-
-                <!-- Priority Update Form -->
-                <form method="POST" class="space-y-4 border-t border-gray-700 pt-4">
-                    <input type="hidden" name="csrf_token" value="<?php echo generateCSRFToken(); ?>">
-                    <input type="hidden" name="action" value="update_priority">
-                    <input type="hidden" name="ticket_id" id="priority-ticket-id">
-                    
                     <div>
-                        <label class="block text-sm font-medium text-gray-300 mb-2">Priority</label>
-                        <select name="priority" id="priority-select" class="w-full px-4 py-3 bg-gray-800 border border-gray-600 rounded-lg text-white focus:border-emerald-500 focus:outline-none">
-                            <option value="low">Low</option>
-                            <option value="medium">Medium</option>
-                            <option value="high">High</option>
-                            <option value="urgent">Urgent</option>
-                        </select>
+                        <label class="block text-sm font-medium text-gray-300 mb-2">Admin Response</label>
+                        <textarea 
+                            name="admin_response" 
+                            rows="4"
+                            class="w-full px-3 py-2 bg-gray-800 border border-gray-600 rounded text-white focus:border-emerald-500 focus:outline-none"
+                            placeholder="Optional response to the user..."
+                        ></textarea>
                     </div>
-                    
-                    <button type="submit" class="w-full px-4 py-2 bg-orange-600 hover:bg-orange-700 text-white rounded-lg font-medium transition">
-                        Update Priority
+                </div>
+                
+                <div class="flex space-x-3 mt-6">
+                    <button type="submit" class="flex-1 px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-medium transition">
+                        Update Ticket
                     </button>
-                </form>
+                    <button type="button" onclick="closeModal('updateTicketModal')" class="px-4 py-2 bg-gray-600 hover:bg-gray-700 text-white rounded-lg font-medium transition">
+                        Cancel
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Assign Ticket Modal -->
+    <div id="assignTicketModal" class="modal">
+        <div class="glass-card rounded-xl p-6 max-w-md w-full m-4">
+            <div class="flex items-center justify-between mb-6">
+                <h3 class="text-xl font-bold text-white">Assign Ticket</h3>
+                <button type="button" onclick="closeModal('assignTicketModal')" class="text-gray-400 hover:text-white transition">
+                    <i class="fas fa-times text-xl"></i>
+                </button>
             </div>
+            
+            <form method="POST">
+                <input type="hidden" name="csrf_token" value="<?php echo generateCSRFToken(); ?>">
+                <input type="hidden" name="action" value="assign_ticket">
+                <input type="hidden" name="ticket_id" id="assignTicketId">
+                
+                <div class="mb-6">
+                    <label class="block text-sm font-medium text-gray-300 mb-2">Assign To *</label>
+                    <select name="assign_to" class="w-full px-3 py-2 bg-gray-800 border border-gray-600 rounded text-white focus:border-emerald-500 focus:outline-none" required>
+                        <option value="">Select Admin</option>
+                        <?php foreach ($admins as $admin): ?>
+                            <option value="<?php echo $admin['id']; ?>"><?php echo htmlspecialchars($admin['full_name']); ?></option>
+                        <?php endforeach; ?>
+                    </select>
+                </div>
+                
+                <div class="flex space-x-3">
+                    <button type="submit" class="flex-1 px-4 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-lg font-medium transition">
+                        Assign Ticket
+                    </button>
+                    <button type="button" onclick="closeModal('assignTicketModal')" class="px-4 py-2 bg-gray-600 hover:bg-gray-700 text-white rounded-lg font-medium transition">
+                        Cancel
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Response Modal -->
+    <div id="responseModal" class="modal">
+        <div class="glass-card rounded-xl p-6 max-w-lg w-full m-4">
+            <div class="flex items-center justify-between mb-6">
+                <h3 class="text-xl font-bold text-white">Add Response</h3>
+                <button type="button" onclick="closeModal('responseModal')" class="text-gray-400 hover:text-white transition">
+                    <i class="fas fa-times text-xl"></i>
+                </button>
+            </div>
+            
+            <form method="POST">
+                <input type="hidden" name="csrf_token" value="<?php echo generateCSRFToken(); ?>">
+                <input type="hidden" name="action" value="add_response">
+                <input type="hidden" name="ticket_id" id="responseTicketId">
+                
+                <div class="mb-6">
+                    <label class="block text-sm font-medium text-gray-300 mb-2">Response *</label>
+                    <textarea 
+                        name="response_text" 
+                        rows="6"
+                        class="w-full px-3 py-2 bg-gray-800 border border-gray-600 rounded text-white focus:border-emerald-500 focus:outline-none"
+                        placeholder="Write your response to the user..."
+                        required
+                    ></textarea>
+                </div>
+                
+                <div class="flex space-x-3">
+                    <button type="submit" class="flex-1 px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-medium transition">
+                        Send Response
+                    </button>
+                    <button type="button" onclick="closeModal('responseModal')" class="px-4 py-2 bg-gray-600 hover:bg-gray-700 text-white rounded-lg font-medium transition">
+                        Cancel
+                    </button>
+                </div>
+            </form>
         </div>
     </div>
 
     <script>
-        function openTicketModal(ticket) {
-            document.getElementById('modal-subject').textContent = ticket.subject;
-            document.getElementById('modal-user').textContent = ticket.full_name;
-            document.getElementById('modal-email').textContent = ticket.email;
-            document.getElementById('modal-created').textContent = new Date(ticket.created_at).toLocaleDateString();
-            document.getElementById('modal-id').textContent = ticket.id;
-            document.getElementById('modal-message').textContent = ticket.message;
-            document.getElementById('modal-ticket-id').value = ticket.id;
-            
+        // Global variables
+        let currentModal = null;
+
+        // Modal functions
+        function viewTicket(ticketId) {
+            // Load ticket details via AJAX
+            fetch(`/admin/api/ticket-details.php?id=${ticketId}`)
+                .then(response => response.text())
+                .then(html => {
+                    document.getElementById('ticketContent').innerHTML = html;
+                    document.getElementById('viewTicketModal').classList.add('show');
+                    currentModal = 'viewTicketModal';
+                })
+                .catch(error => {
+                    console.error('Error loading ticket details:', error);
+                    alert('Failed to load ticket details');
+                });
+        }
+
+        function updateTicket(ticketId, currentStatus) {
+            document.getElementById('updateTicketId').value = ticketId;
+            document.getElementById('statusSelect').value = currentStatus;
+            document.getElementById('updateTicketModal').classList.add('show');
+            currentModal = 'updateTicketModal';
+        }
+
+        function assignTicket(ticketId) {
+            document.getElementById('assignTicketId').value = ticketId;
+            document.getElementById('assignTicketModal').classList.add('show');
+            currentModal = 'assignTicketModal';
+        }
+
+        function addResponse(ticketId) {
+            document.getElementById('responseTicketId').value = ticketId;
             document.getElementById('responseModal').classList.add('show');
+            currentModal = 'responseModal';
         }
 
-        function quickStatusUpdate(ticketId, currentStatus) {
-            document.getElementById('status-ticket-id').value = ticketId;
-            document.getElementById('priority-ticket-id').value = ticketId;
-            document.getElementById('status-select').value = currentStatus;
-            
-            document.getElementById('statusModal').classList.add('show');
-        }
-
-        function closeModal() {
-            document.getElementById('responseModal').classList.remove('show');
-        }
-
-        function closeStatusModal() {
-            document.getElementById('statusModal').classList.remove('show');
-        }
-
-        // Close modals when clicking outside
-        document.getElementById('responseModal').addEventListener('click', function(e) {
-            if (e.target === this) {
-                closeModal();
+        function closeModal(modalId = null) {
+            const modal = modalId || currentModal;
+            if (modal) {
+                document.getElementById(modal).classList.remove('show');
+                currentModal = null;
             }
+        }
+
+        // Event listeners
+        document.addEventListener('DOMContentLoaded', function() {
+            // Close modals when clicking outside
+            document.querySelectorAll('.modal').forEach(modal => {
+                modal.addEventListener('click', function(e) {
+                    if (e.target === this) {
+                        closeModal(this.id);
+                    }
+                });
+            });
+
+            // Keyboard shortcuts
+            document.addEventListener('keydown', function(e) {
+                if (e.key === 'Escape') {
+                    closeModal();
+                }
+            });
+
+            // Enhanced search with debounce
+            let searchTimeout;
+            const searchInput = document.querySelector('input[name="search"]');
+            if (searchInput) {
+                searchInput.addEventListener('input', function() {
+                    clearTimeout(searchTimeout);
+                    searchTimeout = setTimeout(() => {
+                        if (this.value.length >= 3 || this.value.length === 0) {
+                            this.form.submit();
+                        }
+                    }, 1000);
+                });
+            }
+
+            // Form validation
+            document.querySelectorAll('form').forEach(form => {
+                form.addEventListener('submit', function(e) {
+                    const action = this.querySelector('input[name="action"]')?.value;
+                    
+                    if (action === 'update_status') {
+                        const status = this.querySelector('select[name="status"]').value;
+                        if (status === 'closed' || status === 'resolved') {
+                            if (!confirm(`Are you sure you want to mark this ticket as ${status}?`)) {
+                                e.preventDefault();
+                                return false;
+                            }
+                        }
+                    }
+                });
+            });
         });
 
-        document.getElementById('statusModal').addEventListener('click', function(e) {
-            if (e.target === this) {
-                closeStatusModal();
-            }
-        });
-
-        // Auto-refresh every 30 seconds for new tickets
+        // Auto-refresh for high priority tickets
+        <?php if ($stats['urgent_tickets'] > 0): ?>
         setInterval(function() {
-            // Only refresh if no modals are open
-            if (!document.querySelector('.modal.show')) {
-                location.reload();
+            if (!currentModal) {
+                // Check for new urgent tickets
+                fetch('/admin/api/urgent-tickets-count.php')
+                    .then(response => response.json())
+                    .then(data => {
+                        const currentUrgent = <?php echo $stats['urgent_tickets']; ?>;
+                        if (data.urgent_count > currentUrgent) {
+                            // Show notification for new urgent tickets
+                            showNotification('New urgent ticket received!', 'warning');
+                        }
+                    })
+                    .catch(error => console.error('Failed to check urgent tickets:', error));
             }
-        }, 30000);
+        }, 60000); // Check every minute
+        <?php endif; ?>
 
-        // Keyboard shortcuts
-        document.addEventListener('keydown', function(e) {
-            if (e.key === 'Escape') {
-                closeModal();
-                closeStatusModal();
+        // Notification system
+        function showNotification(message, type = 'info') {
+            const notification = document.createElement('div');
+            notification.className = `fixed top-4 right-4 z-50 p-4 rounded-lg shadow-lg transition-all duration-300 ${
+                type === 'success' ? 'bg-emerald-500/20 border border-emerald-500/50 text-emerald-300' :
+                type === 'warning' ? 'bg-yellow-500/20 border border-yellow-500/50 text-yellow-300' :
+                type === 'error' ? 'bg-red-500/20 border border-red-500/50 text-red-300' :
+                'bg-blue-500/20 border border-blue-500/50 text-blue-300'
+            }`;
+            
+            notification.innerHTML = `
+                <div class="flex items-center">
+                    <i class="fas ${
+                        type === 'success' ? 'fa-check-circle' :
+                        type === 'warning' ? 'fa-exclamation-triangle' :
+                        type === 'error' ? 'fa-times-circle' :
+                        'fa-info-circle'
+                    } mr-2"></i>
+                    <span>${message}</span>
+                </div>
+            `;
+            
+            document.body.appendChild(notification);
+            
+            setTimeout(() => {
+                notification.style.opacity = '0';
+                notification.style.transform = 'translateX(100%)';
+                setTimeout(() => notification.remove(), 300);
+            }, 5000);
+        }
+
+        // Quick status change
+        function quickStatusChange(ticketId, newStatus) {
+            if (confirm(`Change ticket status to ${newStatus}?`)) {
+                const formData = new FormData();
+                formData.append('csrf_token', '<?php echo generateCSRFToken(); ?>');
+                formData.append('action', 'update_status');
+                formData.append('ticket_id', ticketId);
+                formData.append('status', newStatus);
+
+                fetch('tickets.php', {
+                    method: 'POST',
+                    body: formData
+                })
+                .then(response => response.text())
+                .then(() => {
+                    location.reload();
+                })
+                .catch(error => {
+                    console.error('Error updating ticket:', error);
+                    alert('Failed to update ticket status');
+                });
             }
+        }
+
+        // Bulk actions (for future implementation)
+        function bulkAssign() {
+            const checkedTickets = document.querySelectorAll('input[name="selected_tickets[]"]:checked');
+            if (checkedTickets.length === 0) {
+                alert('Please select tickets to assign.');
+                return;
+            }
+            console.log('Bulk assign:', checkedTickets.length, 'tickets');
+        }
+
+        function bulkClose() {
+            const checkedTickets = document.querySelectorAll('input[name="selected_tickets[]"]:checked');
+            if (checkedTickets.length === 0) {
+                alert('Please select tickets to close.');
+                return;
+            }
+            console.log('Bulk close:', checkedTickets.length, 'tickets');
+        }
+
+        // Export functionality
+        function exportTickets() {
+            const currentUrl = new URL(window.location.href);
+            currentUrl.searchParams.set('export', 'csv');
+            window.location.href = currentUrl.toString();
+        }
+
+        // Priority badge animation
+        function animatePriorityBadges() {
+            document.querySelectorAll('.ticket-row').forEach(row => {
+                if (row.classList.contains('priority-urgent')) {
+                    const badge = row.querySelector('.bg-red-500\\/20');
+                    if (badge) {
+                        badge.style.animation = 'pulse 2s infinite';
+                    }
+                }
+            });
+        }
+
+        // Initialize
+        document.addEventListener('DOMContentLoaded', function() {
+            animatePriorityBadges();
         });
+
+        // Add CSS for animations
+        const style = document.createElement('style');
+        style.textContent = `
+            @keyframes pulse {
+                0%, 100% { opacity: 1; }
+                50% { opacity: 0.5; }
+            }
+        `;
+        document.head.appendChild(style);
     </script>
 </body>
 </html>
